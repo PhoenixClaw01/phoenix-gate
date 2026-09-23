@@ -46,5 +46,5 @@ This repository is not a sales channel. Hub stays starved here: not a SaaS produ
 ## Out of this tree
 
 - No Osmantic outreach email from this PR.
-- No Continuity vault, Capture factory, tenant ledger, or private spine.
+- No Continuity vault, Capture factory, or private spine.
 - No claim of a finished plateau, and no claim of live Hermes production use.

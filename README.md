@@ -46,21 +46,6 @@ Humans hold intent and last-yes. Agents execute. Every consequential act leaves 
 
 ---
 
-## What this is NOT
-
-| Not this | Why |
-|----------|-----|
-| Capture / SlipVault / contractor paper UX | Small-biz FDE face stays private; free seats ≠ OSS |
-| Tenant auth / multi-tenant ledger / invoice parties | Selling the store |
-| Continuity vault dumps | Trust ≠ dump; private spine stays closed |
-| Hub / Content Hub / outbound SaaS | Hub-as-service starved — not a product in this narrative |
-| “We replaced Hermes” / gym-Dojo software | Optional later fractal; not this face |
-| A paid oxygen cathedral or smarter judge SKU | Thin brick, not an unpaid cathedral |
-
-**Private fence (hard):** Capture factory · ledgers · tenant auth · Continuity vault / PII · wood / Starlink cash streams · Hub Make tokens · full SIOS tip dump.
-
----
-
 ## Quick start
 
 ```bash
@@ -101,12 +86,12 @@ Anti-paralysis craft: every new hard deny needs a paired allow story; gate **act
 
 ---
 
-## Field proof (small biz FDE — no private UX)
+## Field proof
 
-We run the **same spine** in the dirt for small business: hold before send, named last-yes, receipts you can cite.  
-Public desks and Capture seats are **field deployment for small business** — quiet proof the doctrine works — **not** the README hero and **not** open-sourced here.
+We run the same spine in the dirt for small business: hold before send, named last-yes, receipts you can cite.
+Seats are field deployment for small business — quiet proof the doctrine works — not the README hero and not open-sourced here.
 
-If you need help on the ground (Valley Maps / GBP listing fix, Capture seat ask), see the Collective site soft footer when live — not this repo’s issues as a sales channel.
+If you need help on the ground as a small biz, org, or individual, see the Collective site soft footer — not this repo’s issues as a sales channel.
 
 ---
 
