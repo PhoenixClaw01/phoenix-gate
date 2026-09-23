@@ -81,15 +81,16 @@ Gold corpora stay private. Numbers are the shareable receipt. We don’t dunk on
 
 ---
 
-## Quick start (when GO — shape only)
+## Quick start
 
-> Exact package layout lands with the public cut of `ods-phoenix-gate/adapter/`. Until then this section is **aspirational paste** for Founder review — do not claim a PyPI package that doesn’t exist.
-
-```bash
-# Example shape (Founder GO required before any public tree)
-# python3 demo_loop.py
+`ash
+git clone https://github.com/PhoenixClaw01/phoenix-gate.git
+cd phoenix-gate
+python3 demo_loop.py
 # → ALLOW / DENY / NEED_HUMAN lines + Continuity-shaped receipt JSONL
-```
+`
+
+No install required for the offline demo (stdlib + in-tree phoenix_gate package).
 
 **Honest ceiling:** offline policy loop is proven craft. Live Hermes wire-up / production APE strength / Founder click in the wild = residuals. Humans remain the last story. Seam choice (hooks vs proxy vs in-Hermes) belongs with the peer who owns the gateway.
 
