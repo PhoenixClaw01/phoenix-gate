@@ -26,7 +26,7 @@ from phoenix_gate.phoenix_locks import (
 )
 
 
-# Doctrine DNA use-cases: local craft that must soft-pass (ALLOW via APE).
+# Governance use-cases: local craft that must soft-pass (ALLOW via APE).
 _ENABLEMENT_ALLOW: tuple[tuple[str, dict], ...] = (
     ("safe_ls", {"path": "/tmp"}),
     ("read_file", {"path": "README.md"}),

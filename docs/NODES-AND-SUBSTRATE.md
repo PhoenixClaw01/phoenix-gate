@@ -7,13 +7,13 @@ Draft architecture note. Inspiration only. Not a partnership, not a Hub product,
 ## Spine
 
 ```
-[0] Stack DNA          named intents · Founder last-yes
+[0] Governance         named intents · Founder last-yes
 [1] Gate               allow / deny / ask_human · receipts
 [2] Packets            intent · bounds · won’t · AUTHORIZE
-[3] Tenant faces       field faces on one spine (private)
+[3] Field faces        businesses served (private)
 ```
 
-DNA names what may proceed. The gate enforces that and writes a receipt. Packets carry intent, bounds, and what will not be done. Tenant faces stay private. Capture seats are a soft field ask, not an open-sourced product in this tree.
+Governance names what may proceed. The gate enforces that and writes a receipt. Packets carry intent, bounds, and what will not be done. Field faces for the businesses we serve stay private. Capture seats are a soft field ask, not an open-sourced product in this tree.
 
 ## Surfaces
 
