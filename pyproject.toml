@@ -1,0 +1,15 @@
+[project]
+name = "phoenix-gate"
+version = "0.1.9"
+description = "Thin policy gate: named locks · allow/deny/ask_human · receipts"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Phoenix Collective" }]
+
+[project.urls]
+Homepage = "https://github.com/PhoenixClaw01/phoenix-gate"
+Repository = "https://github.com/PhoenixClaw01/phoenix-gate"
+
+[tool.setuptools.packages.find]
+include = ["phoenix_gate*"]
