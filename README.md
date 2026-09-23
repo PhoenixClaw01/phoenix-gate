@@ -3,11 +3,11 @@
 > Thin policy gate for agent tool calls: **named locks · allow / deny / ask_human · receipts.**  
 > Speaks Osmantic APE-shaped verify. Not another agent. Not a model SKU. Not a chat bus.
 
-**Story arc:** DNA → Gate → packets → tenants  
+**Story arc:** Governance → Gate → packets → tenants  
 **Horizon metaphor:** Galia as a fractal testing ground for agentic life — populate with receipts, never spray *(inspiration only; no partnership claim)*.
 
 ```
-[0] Stack DNA (sacred)     SIOS · Continuity · Founder last-yes
+[0] Governance             named intents · Founder last-yes
 [1] Gate Kit (this repo)   named locks · allow/deny/ask_human · receipts
 [2] Ops packets            intent · bounds · won’t · AUTHORIZE
 [3] Tenant faces           field faces on one spine (private)
@@ -21,29 +21,10 @@ Agents will act. Someone has to gate irreversible acts **without killing speed**
 
 A gate that only denies is a **corpse**.  
 A gate that always allows is a **wound**.  
-DNA = named intents → `allow` / `require_approval` / `deny` **and** explicit allow paths so craft still lives.
+Governance = named intents → `allow` / `require_approval` / `deny` **and** explicit allow paths so craft still lives.
 
 **Intelligence should increase sovereignty, not diminish it.**  
 Humans hold intent and last-yes. Agents execute. Every consequential act leaves provenance.
-
----
-
-## Moat proof (calm)
-
-On Phoenix ops gold (**n=26**, receipt-dated **2026-09-22 AT**):
-
-| Judge | Accuracy | lock_false_proceed |
-|-------|----------|--------------------|
-| Offline doctrine / named locks | **0.885** (23/26) | **0** |
-| Live generic decision model path | **0.462** (12/26) | **0** |
-
-**Read:** the product is named locks + human last-yes + Continuity-shaped receipts — **not** a smarter classifier.  
-Gold corpora stay private. Numbers are the shareable receipt. We don’t dunk on peers.
-
-*(Optional methods footnote when asked: advise-only generic path; deterministic named-lock baseline; same gold; both kept lock safety at zero — accuracy is where doctrine won.)*
-
-![Calm scorecard](assets/scorecard-gate-vs-model.svg)  
-
 
 ---
 
@@ -72,7 +53,7 @@ Gold corpora stay private. Numbers are the shareable receipt. We don’t dunk on
 |----------|-----|
 | Capture / SlipVault / contractor paper UX | Small-biz FDE face stays private; free seats ≠ OSS |
 | Tenant auth / multi-tenant ledger / invoice parties | Selling the store |
-| Continuity vault dumps / gold corpora | Trust ≠ dump; moat evidence stays closed |
+| Continuity vault dumps | Trust ≠ dump; private spine stays closed |
 | Hub / Content Hub / outbound SaaS | Hub-as-service starved — not a product in this narrative |
 | “We replaced Hermes” / gym-Dojo software | Optional later fractal; not this face |
 | A paid oxygen cathedral or smarter judge SKU | Money Eye: thin brick, not unpaid cathedral |
@@ -102,7 +83,7 @@ No install required for the offline demo (stdlib + in-tree phoenix_gate package)
 python3 -m unittest discover -s tests -v
 ```
 
-Stdlib unittest against `phoenix_gate` with the offline mock APE. Attack classes stay covered: named locks, args smuggle, receipt chain, multi-agent grants, supply/env, jailbreak echoes, enablement false-positives, and an in-process seam sim (skip-gate, compose, flood). That sim is not Hermes in production. This tree does not claim a gold plateau.
+Stdlib unittest against `phoenix_gate` with the offline mock APE. Attack classes stay covered: named locks, args smuggle, receipt chain, multi-agent grants, supply/env, jailbreak echoes, enablement false-positives, and an in-process seam sim (skip-gate, compose, flood). That sim is not Hermes in production. The suite checks the policy loop on this laptop; it is not a claim of live production use.
 
 CI runs the same command on Python 3.11+ (`.github/workflows/unittest.yml`). No attack class is skipped.
 
@@ -159,7 +140,7 @@ Apache-2.0 · contributions: talk first · no drive-by cathedral PRs
 
 ## Links
 
-- Scorecard + DNA → Gate → packets diagram — in assets/
+- Substrate sketch — [`docs/NODES-AND-SUBSTRATE.md`](docs/NODES-AND-SUBSTRATE.md)
 - Phoenix Collective — https://phoenix-collective.app *(philosophy page when live)*  
 
 ---

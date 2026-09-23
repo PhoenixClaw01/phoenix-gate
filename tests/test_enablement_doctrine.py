@@ -31,7 +31,7 @@ from phoenix_gate.phoenix_locks import (
 )
 
 
-# --- Concrete matrices (mirror DOCTRINE-DNA.md) --------------------------------
+# --- Concrete matrices (governance enablement) ----------------------------------
 
 _ALLOW_LIVELIHOOD: tuple[tuple[str, dict], ...] = (
     # read / inspect
