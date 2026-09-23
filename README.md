@@ -125,18 +125,17 @@ Want the thin Gate Kit when the public tree lands? Leave a quiet note via the Co
 
 ## Status
 
-Draft / early. **Founder last-yes** on anything irreversible — including how we talk about this repo.  
+Public thin cut (Fork A). **Founder last-yes** on anything irreversible.  
 Sequence lock for Phoenix public face: **Git → Collective site → LinkedIn** (this README is the Git face).
 
 ## License
 
-Apache-2.0 *(if Founder GO)* · contributions: talk first · no drive-by cathedral PRs
+Apache-2.0 · contributions: talk first · no drive-by cathedral PRs
 
-## Links (fill only after those GOs)
+## Links
 
-- Phoenix Collective — philosophy page *(after site GO)*  
-- Falkor X — guild story *(after bio GO)*  
-- Scorecard / DNA → Gate → packets diagram — Collective assets when mirrored  
+- Scorecard + DNA → Gate → packets diagram — in ssets/
+- Phoenix Collective — https://phoenix-collective.app *(philosophy page when live)*  
 
 ---
 
