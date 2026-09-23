@@ -3,14 +3,13 @@
 > Thin policy gate for agent tool calls: **named locks · allow / deny / ask_human · receipts.**  
 > Speaks Osmantic APE-shaped verify. Not another agent. Not a model SKU. Not a chat bus.
 
-**Story arc:** Governance → Gate → packets → tenants  
-**Horizon metaphor:** Galia as a fractal testing ground for agentic life — populate with receipts, never spray *(inspiration only; no partnership claim)*.
+**Story arc:** Governance → Gate → packets → businesses we serve
 
 ```
 [0] Governance             named intents · Founder last-yes
 [1] Gate Kit (this repo)   named locks · allow/deny/ask_human · receipts
 [2] Ops packets            intent · bounds · won’t · AUTHORIZE
-[3] Tenant faces           field faces on one spine (private)
+[3] Field faces            businesses served (private)
 ```
 
 ---
@@ -56,7 +55,7 @@ Humans hold intent and last-yes. Agents execute. Every consequential act leaves 
 | Continuity vault dumps | Trust ≠ dump; private spine stays closed |
 | Hub / Content Hub / outbound SaaS | Hub-as-service starved — not a product in this narrative |
 | “We replaced Hermes” / gym-Dojo software | Optional later fractal; not this face |
-| A paid oxygen cathedral or smarter judge SKU | Money Eye: thin brick, not unpaid cathedral |
+| A paid oxygen cathedral or smarter judge SKU | Thin brick, not an unpaid cathedral |
 
 **Private fence (hard):** Capture factory · ledgers · tenant auth · Continuity vault / PII · wood / Starlink cash streams · Hub Make tokens · full SIOS tip dump.
 
@@ -145,5 +144,5 @@ Apache-2.0 · contributions: talk first · no drive-by cathedral PRs
 
 ---
 
-*Heart cathedral · guild energy · invisible founder · Money Eye · no hype BS.*  
+*Heart cathedral · invisible founder · no hype BS.*  
 *Populate, don’t spray.*
