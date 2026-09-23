@@ -83,16 +83,28 @@ Gold corpora stay private. Numbers are the shareable receipt. We don’t dunk on
 
 ## Quick start
 
-`ash
+```bash
 git clone https://github.com/PhoenixClaw01/phoenix-gate.git
 cd phoenix-gate
 python3 demo_loop.py
 # → ALLOW / DENY / NEED_HUMAN lines + Continuity-shaped receipt JSONL
-`
+```
 
 No install required for the offline demo (stdlib + in-tree phoenix_gate package).
 
 **Honest ceiling:** offline policy loop is proven craft. Live Hermes wire-up / production APE strength / Founder click in the wild = residuals. Humans remain the last story. Seam choice (hooks vs proxy vs in-Hermes) belongs with the peer who owns the gateway.
+
+---
+
+## Testing
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Stdlib unittest against `phoenix_gate` with the offline mock APE. Attack classes stay covered: named locks, args smuggle, receipt chain, multi-agent grants, supply/env, jailbreak echoes, enablement false-positives, and an in-process seam sim (skip-gate, compose, flood). That sim is not Hermes in production. This tree does not claim a gold plateau.
+
+CI runs the same command on Python 3.11+ (`.github/workflows/unittest.yml`). No attack class is skipped.
 
 ---
 
@@ -129,13 +141,25 @@ Want the thin Gate Kit when the public tree lands? Leave a quiet note via the Co
 Public thin cut (Fork A). **Founder last-yes** on anything irreversible.  
 Sequence lock for Phoenix public face: **Git → Collective site → LinkedIn** (this README is the Git face).
 
+## Substrate next
+
+Same locks, still thin. Permissionless sovereignty surfaces: **CLI · MCP · HTTP API · plugins**. Workers stay model-agnostic; the gate is not a model SKU.
+
+**Nodes** are optional community / Osmantic-class compute under Gate receipts for small-biz workloads — architecture and inspiration only, no partnership. A node is a watershed you can ignore. The kit runs without one.
+
+Hub stays off this face (not a product here). Sketch: [`docs/NODES-AND-SUBSTRATE.md`](docs/NODES-AND-SUBSTRATE.md).
+
+## Support
+
+GitHub Sponsors — [PhoenixClaw01](https://github.com/sponsors/PhoenixClaw01).
+
 ## License
 
 Apache-2.0 · contributions: talk first · no drive-by cathedral PRs
 
 ## Links
 
-- Scorecard + DNA → Gate → packets diagram — in ssets/
+- Scorecard + DNA → Gate → packets diagram — in assets/
 - Phoenix Collective — https://phoenix-collective.app *(philosophy page when live)*  
 
 ---
