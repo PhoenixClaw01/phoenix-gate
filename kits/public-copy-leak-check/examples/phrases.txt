@@ -1,0 +1,5 @@
+# One phrase per line. Blank lines and lines that start with # are skipped.
+# Replace this file with the list you want scanned. Matching is case-insensitive.
+
+crimson widget
+orbit lantern

@@ -118,6 +118,10 @@ Hub stays off this face (not a product here). Sketch: [`docs/NODES-AND-SUBSTRATE
 
 GitHub Sponsors — [PhoenixClaw01](https://github.com/sponsors/PhoenixClaw01).
 
+## Kits
+
+- [`kits/public-copy-leak-check`](kits/public-copy-leak-check) — scan pages with a phrase file you supply.
+
 ## License
 
 Apache-2.0 · contributions: talk first · no drive-by cathedral PRs
