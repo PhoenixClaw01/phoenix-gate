@@ -1,0 +1,8 @@
+# Paths relative to the kit root. One file per line.
+README.md
+WEEKLY-GAP-AUDIT.md
+injected_instruction_check.py
+repo_drift.py
+watcher_health.py
+examples/manifest.txt
+examples/watcher-status.json
