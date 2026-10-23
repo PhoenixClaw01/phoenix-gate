@@ -28,6 +28,9 @@ env/
 receipts/
 *.jsonl
 
+# Real phrase lists stay on the machine that supplies them.
+phrases.local.txt
+
 # Editors / OS
 .idea/
 .vscode/

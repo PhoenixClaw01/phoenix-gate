@@ -71,6 +71,13 @@ Stdlib unittest against `phoenix_gate` with the offline mock APE. Attack classes
 
 CI runs the same command on Python 3.11+ (`.github/workflows/unittest.yml`). No attack class is skipped.
 
+## Kits
+
+[`kits/README.md`](kits/README.md) lists the kits in this repository.
+
+- [Kintsugi audit](kits/kintsugi-audit/README.md) — a weekly, read-only gap audit.
+- [Public-copy leak check](kits/public-copy-leak-check/README.md) — scan pages with a phrase file you supply.
+
 ---
 
 ## Doctrine metabolism (public-safe)
@@ -86,21 +93,6 @@ Anti-paralysis craft: every new hard deny needs a paired allow story; gate **act
 
 ---
 
-## Field proof
-
-We run the same spine in the dirt for small business: hold before send, named last-yes, receipts you can cite.
-Seats are field deployment for small business — quiet proof the doctrine works — not the README hero and not open-sourced here.
-
-If you need help on the ground as a small biz, org, or individual, see the Collective site soft footer — not this repo’s issues as a sales channel.
-
----
-
-## Interest (soft)
-
-Want the thin Gate Kit when the public tree lands? Leave a quiet note via the Collective site waitlist (when GO) — **pattern + receipts, not another chat bus.** No Hub seats pitch. No spray.
-
----
-
 ## Status
 
 Public thin cut (Fork A). **Founder last-yes** on anything irreversible.  
@@ -110,7 +102,7 @@ Sequence lock for Phoenix public face: **Git → Collective site → LinkedIn** 
 
 Same locks, still thin. Permissionless sovereignty surfaces: **CLI · MCP · HTTP API · plugins**. Workers stay model-agnostic; the gate is not a model SKU.
 
-**Nodes** are optional community / Osmantic-class compute under Gate receipts for small-biz workloads — architecture and inspiration only, no partnership. A node is a watershed you can ignore. The kit runs without one.
+**Nodes** are optional compute under Gate receipts. A node is a watershed you can ignore. The kit runs without one.
 
 Hub stays off this face (not a product here). Sketch: [`docs/NODES-AND-SUBSTRATE.md`](docs/NODES-AND-SUBSTRATE.md).
 

@@ -22,10 +22,6 @@ def load_script(name: str):
     return module
 
 
-def joined(*parts: str) -> str:
-    return "".join(parts)
-
-
 def _rule(name: str, pattern: str, flags: int = 0) -> tuple[str, re.Pattern[str]]:
     return name, re.compile(pattern, flags)
 
@@ -45,25 +41,8 @@ SCRUB_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     _rule("vercel-team", r"\bteam_[A-Za-z0-9]{8,}\b"),
     _rule("eth-wallet", r"\b0x[a-fA-F0-9]{40}\b"),
     _rule("solana-address", r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b"),
-    _rule("starlink", joined("star", "link"), re.IGNORECASE),
-    _rule("phoenix-collective-hyphen", joined("phoenix-", "collective"), re.IGNORECASE),
-    _rule("phoenix-collective-space", joined("phoenix ", "collective"), re.IGNORECASE),
-    _rule("annapolis-valley", joined("annapolis", " valley"), re.IGNORECASE),
-    _rule("small-business", joined("small ", "business"), re.IGNORECASE),
-    _rule("constitution", joined("consti", "tution"), re.IGNORECASE),
-    _rule("sovereignty", joined("sover", "eignty"), re.IGNORECASE),
-    _rule("named-lock", joined("named ", "lock"), re.IGNORECASE),
-    _rule("routing-engine", joined("routing_", "engine"), re.IGNORECASE),
-    _rule("check-routing", joined("check_", "routing"), re.IGNORECASE),
-    _rule("routing-yaml", joined("routing.", "yaml"), re.IGNORECASE),
-    _rule("tooling-repo", joined("sa-", "tooling"), re.IGNORECASE),
-    _rule("iter-doors", joined("iter_", "doors"), re.IGNORECASE),
-    _rule("fractal", joined("frac", "tal"), re.IGNORECASE),
-    _rule("tenant", joined("ten", "ant"), re.IGNORECASE),
-    _rule("partner", joined("part", "ner"), re.IGNORECASE),
-    _rule("phoenix-farms", joined("Phoenix", " Farms")),
-    _rule("claw", r"\bClaw\b", re.IGNORECASE),
-    _rule("founder", r"\bFounder\b", re.IGNORECASE),
+    _rule("crimson-widget", r"crimson widget", re.IGNORECASE),
+    _rule("orbit-lantern", r"orbit lantern", re.IGNORECASE),
 )
 
 
@@ -84,25 +63,8 @@ PLANTED_SAMPLES: tuple[tuple[str, str], ...] = (
     ("vercel-team", "team_example1234567890"),
     ("eth-wallet", "0x" + ("a0" * 20)),
     ("solana-address", "2" * 32),
-    ("starlink", joined("star", "link")),
-    ("phoenix-collective-hyphen", joined("phoenix-", "collective")),
-    ("phoenix-collective-space", joined("phoenix ", "collective")),
-    ("annapolis-valley", joined("annapolis", " valley")),
-    ("small-business", joined("small ", "business")),
-    ("constitution", joined("consti", "tution")),
-    ("sovereignty", joined("sover", "eignty")),
-    ("named-lock", joined("named ", "lock")),
-    ("routing-engine", joined("routing_", "engine")),
-    ("check-routing", joined("check_", "routing")),
-    ("routing-yaml", joined("routing.", "yaml")),
-    ("tooling-repo", joined("sa-", "tooling")),
-    ("iter-doors", joined("iter_", "doors")),
-    ("fractal", joined("frac", "tal")),
-    ("tenant", joined("ten", "ant")),
-    ("partner", joined("part", "ner")),
-    ("phoenix-farms", "Phoenix Farms"),
-    ("claw", "Claw"),
-    ("founder", "Founder"),
+    ("crimson-widget", "crimson widget"),
+    ("orbit-lantern", "orbit lantern"),
 )
 
 
