@@ -27,7 +27,13 @@ PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
         ),
     ),
-    ("private-key", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")),
+    (
+        "private-key",
+        re.compile(
+            r"-----BEGIN ([A-Z0-9 ]*)PRIVATE KEY-----.*?-----END \1PRIVATE KEY-----",
+            re.DOTALL,
+        ),
+    ),
     (
         "labeled-secret",
         re.compile(

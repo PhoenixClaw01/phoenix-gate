@@ -125,7 +125,7 @@ class ExportScrubTests(unittest.TestCase):
             "email": "ada@example.com",
             "phone": "+1 202 555 0147",
             "uuid": "00000000-0000-4000-8000-000000000000",
-            "private-key": "-----BEGIN PRIVATE KEY-----",
+            "private-key": "-----BEGIN PRIVATE KEY-----\nnot-a-key\n-----END PRIVATE KEY-----",
             "labeled-secret": "api_key: orbitlanternexample1",
             "project-id": "prj_example1234567890",
             "team-id": "team_example1234567890",
@@ -138,6 +138,26 @@ class ExportScrubTests(unittest.TestCase):
             cleaned = module.scrub(sample)
             self.assertNotIn(sample, cleaned, sample)
             self.assertIn("[redacted]", cleaned)
+
+    def test_private_key_block_redacts_body_and_end(self):
+        module = load_script("export_scrub.py")
+        text = "\n".join(
+            [
+                "before",
+                "-----BEGIN RSA PRIVATE KEY-----",
+                "not-a-key",
+                "line-two",
+                "-----END RSA PRIVATE KEY-----",
+                "after",
+                "",
+            ]
+        )
+        cleaned = module.scrub(text)
+        self.assertEqual(cleaned, "before\n[redacted]\nafter\n")
+        self.assertNotIn("not-a-key", cleaned)
+        self.assertNotIn("line-two", cleaned)
+        self.assertNotIn("-----END", cleaned)
+        self.assertNotIn("-----BEGIN", cleaned)
 
     def test_optional_phrase_file_and_a_clean_fixture(self):
         module = load_script("export_scrub.py")

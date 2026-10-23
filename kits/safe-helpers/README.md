@@ -31,7 +31,7 @@ python3 kits/safe-helpers/token_bucket.py \
 - email addresses
 - phone numbers
 - UUIDs
-- private-key blocks and labeled secrets (`api key`, `secret key`, `access token` assignments)
+- private-key blocks, from the BEGIN line through the matching END line, and labeled secrets (`api key`, `secret key`, `access token` assignments)
 - ids that start with `prj_` or `team_`
 - wallet addresses (`0x` plus 40 hex digits, and a 32–44 character opaque address)
 
