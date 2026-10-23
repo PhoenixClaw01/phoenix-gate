@@ -10,6 +10,8 @@ One phrase per line. Blank lines and lines that start with `#` are ignored. Matc
 
 `examples/phrases.txt` is a synthetic list (`crimson widget`, `orbit lantern`). `examples/pages/clean-page.md` does not contain those phrases. Scan `examples/pages`, not `examples`, so the phrase file stays outside the scan.
 
+Real phrases go in an untracked `phrases.local.txt`. That name is gitignored. This repository only commits the synthetic example.
+
 ## Run
 
 ```bash
