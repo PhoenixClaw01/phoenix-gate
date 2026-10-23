@@ -112,6 +112,27 @@ class ReviewGateTests(unittest.TestCase):
             self.assertIn("reason: pass", stdout)
             self.assertIn("approved: true", stdout)
 
+    def test_keyed_pairs_stay_in_file_order(self):
+        module = load_script()
+        cases = (
+            (f"verdict: PASS\nsha: {HEAD}\nFAIL {HEAD}\n", 1, "no-pass"),
+            (f"verdict: FAIL\nsha: {HEAD}\nPASS {HEAD}\n", 0, "pass"),
+            (f"FAIL {HEAD}\nverdict: PASS\nsha: {HEAD}\n", 0, "pass"),
+            (f"PASS {HEAD}\nverdict: FAIL\nsha: {HEAD}\n", 1, "no-pass"),
+            (f"verdict: PASS\nFAIL {HEAD}\nsha: {HEAD}\n", 1, "no-pass"),
+            (f"verdict: FAIL\nPASS {HEAD}\nsha: {HEAD}\n", 0, "pass"),
+            (f"PASS {HEAD}\nverdict: FAIL\nsha: {HEAD}\nPASS {HEAD}\n", 0, "pass"),
+            (f"FAIL {HEAD}\nverdict: PASS\nsha: {HEAD}\nFAIL {HEAD}\n", 1, "no-pass"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            note = Path(tmp) / "note.txt"
+            for body, code_expected, reason in cases:
+                note.write_text(body, encoding="utf-8")
+                code, stdout, _stderr = run_main(module, ["--verdict", str(note), "--head", HEAD])
+                self.assertEqual(code, code_expected, body)
+                self.assertIn(f"reason: {reason}", stdout, body)
+                self.assertIn("approved: true" if code_expected == 0 else "approved: false", stdout, body)
+
     def test_pass_and_fail_are_whole_tokens(self):
         module = load_script()
         with tempfile.TemporaryDirectory() as tmp:

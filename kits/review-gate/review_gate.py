@@ -71,36 +71,54 @@ def parse_verdict(text: str) -> list[tuple[str, str | None]]:
 
 def _parse_text(text: str) -> list[tuple[str, str | None]]:
     records: list[tuple[str, str | None]] = []
-    keyed_verdict: str | None = None
-    keyed_sha: str | None = None
-    saw_sha_key = False
+    pending_verdict: str | None = None
+    pending_sha: str | None = None
+    saw_sha = False
+
+    def flush() -> None:
+        nonlocal pending_verdict, pending_sha, saw_sha
+        if pending_verdict is None:
+            pending_sha = None
+            saw_sha = False
+            return
+        if saw_sha and pending_sha is None:
+            raise GateError("bad-verdict")
+        records.append((pending_verdict, pending_sha))
+        pending_verdict = None
+        pending_sha = None
+        saw_sha = False
+
     for line in text.splitlines():
         raw = line.strip()
         if not raw or raw.startswith("#"):
             continue
         lower = raw.lower()
         if lower.startswith("verdict:"):
+            if pending_verdict is not None:
+                flush()
             value = raw.split(":", 1)[1].strip().split()
-            keyed_verdict = whole_verdict(value[0]) if value else None
+            pending_verdict = whole_verdict(value[0]) if value else None
             continue
         if lower.startswith("sha:"):
-            saw_sha_key = True
             token = raw.split(":", 1)[1].strip()
-            keyed_sha = find_sha(token)
-            if token and keyed_sha is None:
+            found = find_sha(token)
+            if token and found is None:
                 raise GateError("bad-verdict")
+            if saw_sha and pending_verdict is not None:
+                flush()
+            pending_sha = found
+            saw_sha = True
             continue
         verdict = None
         for token in raw.split():
             verdict = whole_verdict(token)
             if verdict is not None:
                 break
-        if verdict is not None:
-            records.append((verdict, find_sha(raw)))
-    if keyed_verdict is not None:
-        if saw_sha_key and keyed_sha is None:
-            raise GateError("bad-verdict")
-        records.append((keyed_verdict, keyed_sha))
+        if verdict is None:
+            continue
+        flush()
+        records.append((verdict, find_sha(raw)))
+    flush()
     return records
 
 
