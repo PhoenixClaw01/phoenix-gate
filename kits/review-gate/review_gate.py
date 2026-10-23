@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 SHA_RE = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{40}|[0-9a-fA-F]{64})(?![0-9a-fA-F])")
-WORD_RE = re.compile(r"\b(PASS|FAIL)\b", re.IGNORECASE)
+VERDICT_RE = re.compile(r"PASS|FAIL", re.IGNORECASE)
 
 
 class GateError(Exception):
@@ -32,6 +32,12 @@ def normalize_sha(value: object) -> str:
     if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", token) is None:
         raise GateError("bad-verdict")
     return token
+
+
+def whole_verdict(token: str) -> str | None:
+    if VERDICT_RE.fullmatch(token) is None:
+        return None
+    return token.upper()
 
 
 def find_sha(text: str) -> str | None:
@@ -52,10 +58,14 @@ def parse_verdict(text: str) -> list[tuple[str, str | None]]:
             raise GateError("bad-verdict") from exc
         if not isinstance(data, dict):
             raise GateError("bad-verdict")
-        verdict = str(data.get("verdict", "")).strip().upper()
-        if "sha" not in data or data.get("sha") in (None, ""):
-            return [(verdict, None)]
-        return [(verdict, normalize_sha(data["sha"]))]
+        sha = None
+        if "sha" in data and data.get("sha") not in (None, ""):
+            sha = normalize_sha(data["sha"])
+        tokens = str(data.get("verdict", "")).split()
+        verdict = whole_verdict(tokens[0]) if tokens else None
+        if verdict is None:
+            return []
+        return [(verdict, sha)]
     return _parse_text(stripped)
 
 
@@ -70,7 +80,8 @@ def _parse_text(text: str) -> list[tuple[str, str | None]]:
             continue
         lower = raw.lower()
         if lower.startswith("verdict:"):
-            keyed_verdict = raw.split(":", 1)[1].strip().upper()
+            value = raw.split(":", 1)[1].strip().split()
+            keyed_verdict = whole_verdict(value[0]) if value else None
             continue
         if lower.startswith("sha:"):
             saw_sha_key = True
@@ -79,11 +90,13 @@ def _parse_text(text: str) -> list[tuple[str, str | None]]:
             if token and keyed_sha is None:
                 raise GateError("bad-verdict")
             continue
-        words = {match.group(1).upper() for match in WORD_RE.finditer(raw)}
-        if words == {"PASS"}:
-            records.append(("PASS", find_sha(raw)))
-        elif words == {"FAIL"}:
-            records.append(("FAIL", find_sha(raw)))
+        verdict = None
+        for token in raw.split():
+            verdict = whole_verdict(token)
+            if verdict is not None:
+                break
+        if verdict is not None:
+            records.append((verdict, find_sha(raw)))
     if keyed_verdict is not None:
         if saw_sha_key and keyed_sha is None:
             raise GateError("bad-verdict")
@@ -93,8 +106,18 @@ def _parse_text(text: str) -> list[tuple[str, str | None]]:
 
 def evaluate(records: list[tuple[str, str | None]], head: str) -> dict[str, object]:
     current = head.lower()
-    if any(verdict == "PASS" and sha == current for verdict, sha in records):
+    # Last PASS or FAIL for this sha wins. A FAIL with no sha counts too,
+    # so a later FAIL overrides an earlier PASS.
+    last_for_head: str | None = None
+    for verdict, sha in records:
+        if verdict == "PASS" and sha == current:
+            last_for_head = "PASS"
+        elif verdict == "FAIL" and sha in (current, None):
+            last_for_head = "FAIL"
+    if last_for_head == "PASS":
         decision, reason, approved = "allow", "pass", True
+    elif last_for_head == "FAIL":
+        decision, reason, approved = "refuse", "no-pass", False
     elif any(verdict == "PASS" and sha not in (None, current) for verdict, sha in records):
         decision, reason, approved = "refuse", "stale", False
     elif any(verdict == "PASS" and sha is None for verdict, sha in records):

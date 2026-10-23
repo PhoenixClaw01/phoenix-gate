@@ -87,6 +87,56 @@ class ReviewGateTests(unittest.TestCase):
         self.assertIn("reason: pass", stdout)
         self.assertIn("approved: true", stdout)
 
+    def test_later_fail_overrides_an_earlier_pass(self):
+        module = load_script()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            later_fail = root / "later-fail.txt"
+            later_fail.write_text(f"PASS {HEAD}\nnote\nFAIL {HEAD}\n", encoding="utf-8")
+            code, stdout, _stderr = run_main(module, ["--verdict", str(later_fail), "--head", HEAD])
+            self.assertEqual(code, 1)
+            self.assertIn("decision: refuse", stdout)
+            self.assertIn("reason: no-pass", stdout)
+            self.assertIn("approved: false", stdout)
+
+            unbound = root / "unbound-fail.txt"
+            unbound.write_text(f"PASS {HEAD}\nFAIL\n", encoding="utf-8")
+            code, stdout, _stderr = run_main(module, ["--verdict", str(unbound), "--head", HEAD])
+            self.assertEqual(code, 1)
+            self.assertIn("reason: no-pass", stdout)
+
+            later_pass = root / "later-pass.txt"
+            later_pass.write_text(f"FAIL {HEAD}\nPASS {HEAD}\n", encoding="utf-8")
+            code, stdout, _stderr = run_main(module, ["--verdict", str(later_pass), "--head", HEAD])
+            self.assertEqual(code, 0)
+            self.assertIn("reason: pass", stdout)
+            self.assertIn("approved: true", stdout)
+
+    def test_pass_and_fail_are_whole_tokens(self):
+        module = load_script()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hyphen = root / "hyphen.txt"
+            hyphen.write_text(f"PASS-WITH-NOTES {HEAD}\n", encoding="utf-8")
+            passing = root / "passing.txt"
+            passing.write_text(f"PASSING {HEAD}\n", encoding="utf-8")
+            payload = root / "payload.json"
+            payload.write_text(
+                '{"verdict": "PASS-WITH-NOTES", "sha": "' + HEAD + '"}\n',
+                encoding="utf-8",
+            )
+            for path in (hyphen, passing, payload):
+                code, stdout, _stderr = run_main(module, ["--verdict", str(path), "--head", HEAD])
+                self.assertEqual(code, 1, path.name)
+                self.assertIn("reason: no-pass", stdout)
+                self.assertNotIn("reason: pass", stdout)
+            notes = root / "notes.txt"
+            notes.write_text(f"PASS {HEAD} ship it\n", encoding="utf-8")
+            code, stdout, _stderr = run_main(module, ["--verdict", str(notes), "--head", HEAD])
+            self.assertEqual(code, 0)
+            self.assertIn("reason: pass", stdout)
+            self.assertIn("approved: true", stdout)
+
     def test_pass_without_a_sha_refuses(self):
         module = load_script()
         with tempfile.TemporaryDirectory() as tmp:
