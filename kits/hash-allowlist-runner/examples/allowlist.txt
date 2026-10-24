@@ -1,0 +1,2 @@
+# sha256 of examples/hello.py
+2e818b4072e936dc8a82b9ecff9ce63b65b1fd538d1679a6cea88d0e5b2c6bbd hello.py
