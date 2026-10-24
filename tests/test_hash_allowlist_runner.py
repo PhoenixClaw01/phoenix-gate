@@ -552,7 +552,6 @@ class HashAllowlistBehaviorTests(unittest.TestCase):
             marker = root / "marker.txt"
             hook.write_text(f"#!/bin/sh\necho pwned >> {marker}\n", encoding="utf-8")
             hook.chmod(hook.stat().st_mode | stat.S_IEXEC)
-            git(repo, "config", "core.fsmonitor", str(hook))
             git(repo, "config", "alias.status", f"!{hook}")
             git(repo, "config", "alias.rev-parse", f"!{hook}")
             git(repo, "config", "alias.ls-files", f"!{hook}")
@@ -958,83 +957,167 @@ class HashAllowlistBehaviorTests(unittest.TestCase):
                     with self.subTest(name=name, place=place, dirty=dirty):
                         check(name, place, dirty)
 
-    def test_linked_worktree_checks_the_common_git_dir(self):
+    def test_unusual_layouts_refuse_before_status(self):
         runner = load_script("runner.py", KIT)
-        source = "print('worktree-ok')\n"
+        source = (
+            "from pathlib import Path\n"
+            "Path('ran.txt').write_text('yes\\n', encoding='utf-8')\n"
+            "print('layout-ran')\n"
+        )
 
-        def linked_pair(root: Path) -> tuple[Path, Path]:
-            repo = root / "main"
+        def expect_layout(root: Path, repo: Path, script: Path, receipt: str) -> None:
+            allowlist = root / "allowlist.txt"
+            allowlist.write_text(runner.file_sha256(script) + "\n", encoding="utf-8")
+            code, body, _echoed, _stderr = run_main(
+                runner, allowlist, script, repo, root / receipt
+            )
+            self.assertEqual(code, 1)
+            self.assertIn("decision: refuse", body)
+            self.assertIn("reason: unsupported-layout", body)
+            self.assertIn("sha256: none", body)
+            self.assertNotIn("layout-ran", body)
+            self.assertFalse((repo / "ran.txt").exists())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "odd\nname"
             script = commit_script(repo, source)
+            expect_layout(root, repo, script, "newline.txt")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "main"
+            commit_script(repo, source)
             linked = root / "linked"
             git(repo, "worktree", "add", "--detach", str(linked), "HEAD")
-            return repo, linked
+            self.assertTrue((linked / ".git").is_file())
+            expect_layout(root, linked, linked / "script.py", "linked.txt")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            script = repo / "script.py"
+            script.write_text(source, encoding="utf-8")
+            outside = root / "separate.git"
+            git(repo, "init", f"--separate-git-dir={outside}")
+            git(repo, "add", "script.py")
+            git(repo, "commit", "-m", "add script")
+            self.assertTrue((repo / ".git").is_file())
+            expect_layout(root, repo, script, "separate.txt")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "filegit"
+            repo.mkdir()
+            script = repo / "script.py"
+            script.write_text(source, encoding="utf-8")
+            (repo / ".git").write_text("gitdir: /tmp/does-not-exist\n", encoding="utf-8")
+            expect_layout(root, repo, script, "gitdir.txt")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            script = commit_script(repo, source)
+            aside = root / "real-git"
+            (repo / ".git").rename(aside)
+            (repo / ".git").symlink_to(aside)
+            self.assertTrue((repo / ".git").is_symlink())
+            expect_layout(root, repo, script, "symlink.txt")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bare = root / "bare.git"
+            subprocess.run(
+                ["git", "init", "--bare", str(bare)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            script = bare / "script.py"
+            script.write_text(source, encoding="utf-8")
+            expect_layout(root, bare, script, "bare.txt")
+
+    def test_included_repo_config_refuses(self):
+        runner = load_script("runner.py", KIT)
+        source = (
+            "from pathlib import Path\n"
+            "Path('ran.txt').write_text('yes\\n', encoding='utf-8')\n"
+            "print('include-ok')\n"
+        )
 
         def hook_script(path: Path, sentinel: Path) -> None:
             quoted = "'" + str(sentinel).replace("'", "'\\''") + "'"
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("#!/bin/sh\necho ran >> " + quoted + "\n", encoding="utf-8")
+            path.write_text(
+                "#!/bin/sh\necho ran >> " + quoted + "\ncat\n",
+                encoding="utf-8",
+            )
             path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+        def refuse(kind: str) -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                repo = root / "repo"
+                script = commit_script(repo, source)
+                sentinel = root / "sentinel.txt"
+                included = root / "included.gitconfig"
+                if kind == "fsmonitor":
+                    hook = root / "fsmonitor.sh"
+                    hook_script(hook, sentinel)
+                    included.write_text(
+                        "[core]\n\tfsmonitor = " + str(hook) + "\n",
+                        encoding="utf-8",
+                    )
+                elif kind == "hooksPath":
+                    hook_dir = root / "alt-hooks"
+                    hook_script(hook_dir / "post-index-change", sentinel)
+                    included.write_text(
+                        "[core]\n\thooksPath = " + str(hook_dir) + "\n",
+                        encoding="utf-8",
+                    )
+                else:
+                    hook = root / "filter.sh"
+                    hook_script(hook, sentinel)
+                    included.write_text(
+                        '[filter "sample"]\n\tclean = ' + str(hook) + "\n",
+                        encoding="utf-8",
+                    )
+                    (repo / ".gitattributes").write_text("* filter=sample\n", encoding="utf-8")
+                    git(repo, "add", ".gitattributes")
+                    git(repo, "commit", "-m", "select sample filter")
+                git(repo, "config", "include.path", str(included))
+                if sentinel.exists():
+                    sentinel.unlink()
+                allowlist = root / "allowlist.txt"
+                allowlist.write_text(runner.file_sha256(script) + "\n", encoding="utf-8")
+                code, body, _echoed, _stderr = run_main(
+                    runner, allowlist, script, repo, root / f"{kind}.txt"
+                )
+                self.assertEqual(code, 1)
+                self.assertIn("decision: refuse", body)
+                self.assertIn("reason: unsafe-config", body)
+                self.assertIn("sha256: none", body)
+                self.assertNotIn("include-ok", body)
+                self.assertFalse(sentinel.exists())
+                self.assertFalse((repo / "ran.txt").exists())
+
+        for kind in ("fsmonitor", "hooksPath", "filter"):
+            with self.subTest(kind=kind):
+                refuse(kind)
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            _repo, linked = linked_pair(root)
-            script = linked / "script.py"
+            repo = root / "repo"
+            script = commit_script(repo, "print('plain-ok')\n")
+            included = root / "included.gitconfig"
+            included.write_text("[core]\n\tfsmonitor = false\n", encoding="utf-8")
+            git(repo, "config", "include.path", str(included))
             allowlist = root / "allowlist.txt"
             allowlist.write_text(runner.file_sha256(script) + "\n", encoding="utf-8")
             code, body, _echoed, _stderr = run_main(
-                runner, allowlist, script, linked, root / "clean.txt"
+                runner, allowlist, script, repo, root / "false.txt"
             )
             self.assertEqual(code, 0)
             self.assertIn("decision: allow", body)
-            self.assertIn("worktree-ok", body)
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            repo, linked = linked_pair(root)
-            sentinel = root / "sentinel.txt"
-            hook_script(repo / ".git" / "hooks" / "post-index-change", sentinel)
-            script = linked / "script.py"
-            allowlist = root / "allowlist.txt"
-            allowlist.write_text(runner.file_sha256(script) + "\n", encoding="utf-8")
-            code, body, _echoed, _stderr = run_main(
-                runner, allowlist, script, linked, root / "hook.txt"
-            )
-            self.assertEqual(code, 1)
-            self.assertIn("reason: unsafe-config", body)
-            self.assertNotIn("worktree-ok", body)
-            self.assertFalse(sentinel.exists())
-
-        for key, target in (
-            ("filter.sample.clean", "filter.sh"),
-            ("core.hooksPath", "alt-hooks"),
-            ("core.fsmonitor", "fsmonitor.sh"),
-        ):
-            with self.subTest(key=key):
-                with tempfile.TemporaryDirectory() as tmp:
-                    root = Path(tmp)
-                    repo, linked = linked_pair(root)
-                    sentinel = root / "sentinel.txt"
-                    if key == "core.hooksPath":
-                        hook_dir = root / "alt-hooks"
-                        hook_script(hook_dir / "post-index-change", sentinel)
-                        value = str(hook_dir)
-                    else:
-                        command = root / target
-                        hook_script(command, sentinel)
-                        value = str(command)
-                    git(repo, "config", "extensions.worktreeConfig", "true")
-                    git(linked, "config", "--worktree", key, value)
-                    if key == "filter.sample.clean":
-                        (linked / ".gitattributes").write_text("* filter=sample\n", encoding="utf-8")
-                    if sentinel.exists():
-                        sentinel.unlink()
-                    script = linked / "script.py"
-                    allowlist = root / "allowlist.txt"
-                    allowlist.write_text(runner.file_sha256(script) + "\n", encoding="utf-8")
-                    code, body, _echoed, _stderr = run_main(
-                        runner, allowlist, script, linked, root / "cfg.txt"
-                    )
-                    self.assertEqual(code, 1)
-                    self.assertIn("reason: unsafe-config", body)
-                    self.assertNotIn("worktree-ok", body)
-                    self.assertFalse(sentinel.exists())
+            self.assertIn("plain-ok", body)

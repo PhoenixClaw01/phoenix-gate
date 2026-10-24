@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Run a script only when its sha256 is allowlisted and the git tree is clean.
 
-The work tree is checked first. A repo filter driver or hook refuses before
+Only a plain repository is supported: the git directory is the real directory
+<root>/.git, and that directory is the common git directory. Anything else
+refuses before status. A repo filter driver or hook also refuses before
 status. Git calls do not start hooks and do not refresh the index.
 Only then are the script bytes read, and only when they match HEAD. Those
 bytes are what runs. The path is not executed.
@@ -246,42 +248,18 @@ def _filter_driver_name(key: str) -> str | None:
 def local_filter_drivers(root: Path) -> tuple[str, ...] | None:
     """Repo filter drivers, including ones included from repo config.
 
-    None means the config could not be read. Exit 1 is an empty list.
-    This read does not run clean, smudge, or process commands.
+    None means the config could not be read. This read does not run drivers.
     """
-    names: set[str] = set()
-    failed = False
-    root_real = Path(os.path.realpath(root))
-    for extra in (
-        ("--local", "--get-regexp", r"^filter\."),
-        ("--get-regexp", r"^filter\."),
-    ):
-        try:
-            probe = subprocess.run(
-                [*_git_prefix(root), "config", *extra],
-                capture_output=True,
-                encoding="utf-8",
-                errors="surrogateescape",
-                env=git_env(root),
-                cwd=str(root_real),
-                check=False,
-                shell=False,
-            )
-        except FileNotFoundError as exc:
-            raise RunnerError("git is missing") from exc
-        if probe.returncode == 1:
-            continue
-        if probe.returncode != 0:
-            failed = True
-            continue
-        for line in probe.stdout.splitlines():
-            if not line.strip():
-                continue
-            name = _filter_driver_name(line.split()[0])
-            if name:
-                names.add(name)
-    if failed and not names:
+    records = _scoped_config(root)
+    if records is None:
         return None
+    names: set[str] = set()
+    for scope, key, _value in records:
+        if scope in {"system", "global", "command"}:
+            continue
+        name = _filter_driver_name(key)
+        if name:
+            names.add(name)
     return tuple(sorted(names))
 
 
@@ -367,76 +345,17 @@ def _attributes_file_selects_filter(path: Path) -> bool:
     return any(_line_selects_filter(line) for line in text.splitlines())
 
 
-def _info_attributes_path(root_real: Path) -> Path | None:
-    git_meta = root_real / ".git"
+def _git_bytes(
+    root: Path,
+    args: list[str],
+    *,
+    hooks: bool,
+    fsmonitor: bool,
+) -> subprocess.CompletedProcess[bytes]:
     try:
-        info = git_meta.lstat()
-    except OSError:
-        return None
-    if stat.S_ISLNK(info.st_mode):
-        return git_meta
-    if stat.S_ISDIR(info.st_mode):
-        return git_meta / "info" / "attributes"
-    if not stat.S_ISREG(info.st_mode):
-        return None
-    try:
-        fd = os.open(git_meta, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    except OSError:
-        return git_meta
-    try:
-        raw = os.read(fd, 4096)
-    finally:
-        os.close(fd)
-    for line in raw.decode("utf-8", errors="replace").splitlines():
-        if line.startswith("gitdir: "):
-            git_dir = Path(line[len("gitdir: ") :].strip())
-            if not git_dir.is_absolute():
-                git_dir = root_real / git_dir
-            return git_dir / "info" / "attributes"
-    return None
-
-
-def _config_key_is_set(root: Path, key: str) -> bool | None:
-    """True when repo config sets key. False when unset. None when unreadable."""
-    failed = False
-    root_real = Path(os.path.realpath(root))
-    pattern = "^" + key.replace(".", r"\.") + "$"
-    for extra in (
-        ("--local", "--get-regexp", pattern),
-        ("--get-regexp", pattern),
-    ):
-        try:
-            probe = subprocess.run(
-                [*_git_prefix(root, hooks=False), "config", *extra],
-                capture_output=True,
-                encoding="utf-8",
-                errors="surrogateescape",
-                env=git_env(root),
-                cwd=str(root_real),
-                check=False,
-                shell=False,
-            )
-        except FileNotFoundError as exc:
-            raise RunnerError("git is missing") from exc
-        if probe.returncode == 0 and probe.stdout.strip():
-            return True
-        if probe.returncode == 1:
-            continue
-        if probe.returncode != 0:
-            failed = True
-    if failed:
-        return None
-    return False
-
-
-def _rev_parse_lines(root: Path, *args: str) -> list[str] | None:
-    """Absolute rev-parse output. None when git cannot answer."""
-    try:
-        probe = subprocess.run(
-            [*_git_prefix(root, hooks=False), "rev-parse", *args],
+        return subprocess.run(
+            [*_git_prefix(root, hooks=hooks, fsmonitor=fsmonitor), *args],
             capture_output=True,
-            encoding="utf-8",
-            errors="surrogateescape",
             env=git_env(root),
             cwd=str(Path(os.path.realpath(root))),
             check=False,
@@ -444,25 +363,164 @@ def _rev_parse_lines(root: Path, *args: str) -> list[str] | None:
         )
     except FileNotFoundError as exc:
         raise RunnerError("git is missing") from exc
+
+
+def _contains_control(text: str) -> bool:
+    return any(ord(char) < 32 or ord(char) == 127 for char in text)
+
+
+def _contains_control_bytes(raw: bytes) -> bool:
+    return any(byte < 32 or byte == 127 for byte in raw)
+
+
+def _rev_parse_fields(blob: bytes, count: int) -> tuple[str, ...] | None:
+    """NUL records when git emits them. A control byte in a path is a refusal.
+
+    Git 2.43 prints a literal ``-z`` and separates answers with newlines. An
+    embedded newline then changes the record count, so the path is not
+    truncated into a layout that looks plain.
+    """
+    if b"\0" in blob:
+        parts = blob.split(b"\0")
+    else:
+        parts = blob.split(b"\n")
+    if parts and parts[-1] == b"":
+        parts.pop()
+    echoed = [index for index, part in enumerate(parts) if part == b"-z"]
+    if len(echoed) > 1:
+        return None
+    if len(echoed) == 1:
+        del parts[echoed[0]]
+    elif b"\0" not in blob:
+        return None
+    if len(parts) != count:
+        return None
+    decoded: list[str] = []
+    for part in parts:
+        if _contains_control_bytes(part):
+            return None
+        decoded.append(part.decode("utf-8", errors="surrogateescape").strip())
+    return tuple(decoded)
+
+
+def _plain_layout(root: Path) -> str:
+    """Return ok, not-a-repo, or unsupported-layout. Does not run status."""
+    root_real = os.path.realpath(root)
+    git_meta = os.path.join(root_real, ".git")
+    try:
+        info = os.lstat(git_meta)
+    except FileNotFoundError:
+        info = None
+    except OSError:
+        return "unsupported-layout"
+    if info is not None and (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)):
+        return "unsupported-layout"
+    # --show-toplevel fails in a bare repository, so it is a second read.
+    probe = _git_bytes(
+        root,
+        [
+            "rev-parse",
+            "-z",
+            "--path-format=absolute",
+            "--absolute-git-dir",
+            "--git-common-dir",
+            "--is-bare-repository",
+        ],
+        hooks=True,
+        fsmonitor=True,
+    )
+    if _contains_control(root_real):
+        return "unsupported-layout"
+    if probe.returncode != 0:
+        return "not-a-repo"
+    fields = _rev_parse_fields(probe.stdout, 3)
+    if fields is None:
+        return "unsupported-layout"
+    git_dir, common, bare = fields
+    if bare == "true" or any(_contains_control(item) for item in (git_dir, common)):
+        return "unsupported-layout"
+    if info is None or not stat.S_ISDIR(info.st_mode):
+        return "unsupported-layout"
+    if os.path.realpath(git_dir) != os.path.realpath(git_meta):
+        return "unsupported-layout"
+    if os.path.realpath(common) != os.path.realpath(git_dir):
+        return "unsupported-layout"
+    top = _git_bytes(
+        root,
+        ["rev-parse", "-z", "--path-format=absolute", "--show-toplevel"],
+        hooks=True,
+        fsmonitor=True,
+    )
+    if top.returncode != 0:
+        return "not-a-repo"
+    top_fields = _rev_parse_fields(top.stdout, 1)
+    if top_fields is None or _contains_control(top_fields[0]):
+        return "unsupported-layout"
+    if os.path.realpath(top_fields[0]) != root_real:
+        return "not-a-repo"
+    return "ok"
+
+
+_CONFIG_RE = r"^(core\.(fsmonitor|hookspath)|filter\.)"
+_IGNORED_CONFIG_SCOPES = {"system", "global", "command"}
+_BENIGN_CONFIG_VALUES = {"false", "0"}
+
+
+def _scoped_config(root: Path) -> list[tuple[str, str, str]] | None:
+    """Local config, including includes. None when the read fails.
+
+    Records are (scope, key, value). The query follows includes and does not
+    hide repo core.fsmonitor or core.hooksPath with an override.
+    """
+    probe = _git_bytes(
+        root,
+        [
+            "config",
+            "--includes",
+            "--show-scope",
+            "--null",
+            "--get-regexp",
+            _CONFIG_RE,
+        ],
+        hooks=False,
+        fsmonitor=False,
+    )
+    if probe.returncode == 1:
+        return []
     if probe.returncode != 0:
         return None
-    lines = [line.strip() for line in probe.stdout.splitlines() if line.strip()]
-    return lines or None
+    return _parse_scoped_config(probe.stdout)
 
 
-def _git_layout(root: Path) -> tuple[Path, Path, Path] | None:
-    """Per-worktree git dir, common git dir, and the hooks path git would use."""
-    lines = _rev_parse_lines(
-        root,
-        "--path-format=absolute",
-        "--absolute-git-dir",
-        "--git-common-dir",
-        "--git-path",
-        "hooks",
-    )
-    if lines is None or len(lines) < 3:
+def _parse_scoped_config(blob: bytes) -> list[tuple[str, str, str]] | None:
+    """Parse ``scope NUL key newline value NUL`` records."""
+    if not blob:
+        return []
+    parts = blob.split(b"\0")
+    if parts and parts[-1] == b"":
+        parts.pop()
+    if len(parts) % 2 != 0:
         return None
-    return Path(lines[0]), Path(lines[1]), Path(lines[2])
+    records: list[tuple[str, str, str]] = []
+    for index in range(0, len(parts), 2):
+        scope = parts[index].decode("utf-8", errors="surrogateescape").strip()
+        key_value = parts[index + 1]
+        split_at = key_value.find(b"\n")
+        if split_at < 0:
+            return None
+        key = key_value[:split_at].decode("utf-8", errors="surrogateescape").strip()
+        value = key_value[split_at + 1 :].decode("utf-8", errors="surrogateescape")
+        records.append((scope, key, value))
+    return records
+
+
+def _config_record_is_unsafe(scope: str, _key: str, value: str) -> bool:
+    if scope in _IGNORED_CONFIG_SCOPES:
+        return False
+    text = value.strip()
+    if not text or text.lower() in _BENIGN_CONFIG_VALUES:
+        return False
+    return True
 
 
 def _directory_has_executable_hook(hooks: Path) -> bool:
@@ -496,152 +554,11 @@ def _directory_has_executable_hook(hooks: Path) -> bool:
     return False
 
 
-def _config_text_is_unsafe(text: str, *, include_fsmonitor: bool) -> bool:
-    """True when an ini config selects a filter, hooksPath, or (optionally) fsmonitor."""
-    section = ""
-    subsection = ""
-    for raw in text.splitlines():
-        stripped = raw.strip()
-        if not stripped or stripped.startswith(("#", ";")):
-            continue
-        if stripped.startswith("[") and stripped.endswith("]"):
-            body = stripped[1:-1].strip()
-            if " " in body:
-                name, _, rest = body.partition(" ")
-                section = name.strip().lower()
-                subsection = rest.strip().strip('"').lower()
-            else:
-                section = body.lower()
-                subsection = ""
-            continue
-        if "=" not in stripped:
-            continue
-        key, value = stripped.split("=", 1)
-        key = key.strip().lower()
-        if not value.strip():
-            continue
-        if section == "filter" and subsection and key in {"clean", "smudge", "process", "required"}:
-            return True
-        if section == "core" and key == "hookspath":
-            return True
-        if (
-            include_fsmonitor
-            and section == "core"
-            and key == "fsmonitor"
-            and value.strip().lower() not in {"false", "0"}
-        ):
-            return True
-    return False
-
-
-def _config_file_is_unsafe(path: Path, *, include_fsmonitor: bool) -> bool:
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        return True
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    except OSError:
-        return True
-    try:
-        data = os.read(fd, 1024 * 1024 + 1)
-    finally:
-        os.close(fd)
-    if len(data) > 1024 * 1024:
-        return True
-    return _config_text_is_unsafe(
-        data.decode("utf-8", errors="replace"),
-        include_fsmonitor=include_fsmonitor,
-    )
-
-
-def _config_probe_is_unsafe(text: str, pattern: str) -> bool:
-    for line in text.splitlines():
-        parts = line.split(None, 1)
-        if len(parts) < 2 or not parts[1].strip():
-            continue
-        if pattern.endswith("fsmonitor$") and parts[1].strip().lower() in {"false", "0"}:
-            continue
-        return True
-    return False
-
-
-def _worktree_git_config_is_unsafe(root: Path) -> bool:
-    """True when extensions.worktreeConfig exposes a filter, hooksPath, or fsmonitor."""
-    enabled = _config_key_is_set(root, "extensions.worktreeConfig")
-    if enabled is None:
-        return True
-    if not enabled:
-        return False
-    root_real = Path(os.path.realpath(root))
-    for pattern in (r"^filter\.", r"^core\.hooksPath$", r"^core\.fsmonitor$"):
-        try:
-            probe = subprocess.run(
-                [
-                    *_git_prefix(root, hooks=False, fsmonitor=False),
-                    "config",
-                    "--worktree",
-                    "--get-regexp",
-                    pattern,
-                ],
-                capture_output=True,
-                encoding="utf-8",
-                errors="surrogateescape",
-                env=git_env(root),
-                cwd=str(root_real),
-                check=False,
-                shell=False,
-            )
-        except FileNotFoundError as exc:
-            raise RunnerError("git is missing") from exc
-        if probe.returncode == 0 and _config_probe_is_unsafe(probe.stdout, pattern):
-            return True
-        if probe.returncode in (0, 1, 128):
-            continue
-        return True
-    return False
-
-
-def repo_hooks_are_unsafe(root: Path) -> bool:
-    """Refuse when either git dir has an executable hook or selects hook config."""
-    layout = _git_layout(root)
-    if layout is None:
-        return True
-    git_dir, common, hooks_path = layout
-    seen: set[str] = set()
-    for directory in (git_dir / "hooks", common / "hooks", hooks_path):
-        identity = str(directory)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        if _directory_has_executable_hook(directory):
-            return True
-    if _config_file_is_unsafe(common / "config", include_fsmonitor=False):
-        return True
-    if _config_file_is_unsafe(git_dir / "config.worktree", include_fsmonitor=True):
-        return True
-    if _worktree_git_config_is_unsafe(root):
-        return True
-    configured = _config_key_is_set(root, "core.hooksPath")
-    return configured is None or configured
-
-
 def attributes_select_filter(root: Path) -> bool:
     """True when attributes would select a clean, smudge, or process filter."""
     root_real = Path(os.path.realpath(root))
-    info_attributes = _info_attributes_path(root_real)
-    if info_attributes is not None and _attributes_file_selects_filter(info_attributes):
+    if _attributes_file_selects_filter(root_real / ".git" / "info" / "attributes"):
         return True
-    layout = _git_layout(root)
-    if layout is not None:
-        git_dir, common, _hooks = layout
-        for extra in (common / "info" / "attributes", git_dir / "info" / "attributes"):
-            if _attributes_file_selects_filter(extra):
-                return True
     for dirpath, dirnames, filenames in os.walk(root_real, followlinks=False):
         kept: list[str] = []
         for name in dirnames:
@@ -658,21 +575,16 @@ def attributes_select_filter(root: Path) -> bool:
 
 
 def tree_state(root: Path) -> str:
-    """Return clean, dirty, not-a-repo, or unsafe-config. Git stays on this machine."""
-    root_real = Path(os.path.realpath(root))
-    drivers = local_filter_drivers(root)
-    probe = git_probe(root, "rev-parse", "--show-toplevel")
-    if probe.returncode != 0:
-        return "not-a-repo"
-    top = probe.stdout.strip()
-    if not top or os.path.realpath(top) != str(root_real):
-        return "not-a-repo"
-    if (
-        drivers is None
-        or drivers
-        or attributes_select_filter(root)
-        or repo_hooks_are_unsafe(root)
-    ):
+    """Return clean, dirty, not-a-repo, unsafe-config, or unsupported-layout."""
+    layout = _plain_layout(root)
+    if layout != "ok":
+        return layout
+    records = _scoped_config(root)
+    if records is None or any(_config_record_is_unsafe(*record) for record in records):
+        return "unsafe-config"
+    if _directory_has_executable_hook(Path(os.path.realpath(root)) / ".git" / "hooks"):
+        return "unsafe-config"
+    if attributes_select_filter(root):
         return "unsafe-config"
     status = git_probe(root, "status", "--porcelain", "--ignored", "--untracked-files=all")
     if status.returncode != 0:
@@ -750,6 +662,8 @@ def decide(root: Path, script: Path, allowlist: list[str]) -> dict[str, object]:
             reason = "dirty-tree"
         elif state == "unsafe-config":
             reason = "unsafe-config"
+        elif state == "unsupported-layout":
+            reason = "unsupported-layout"
         else:
             reason = "not-a-repo"
         return _result("refuse", reason, "none", None, "", "")
