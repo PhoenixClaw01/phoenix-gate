@@ -579,6 +579,7 @@ class HashAllowlistBehaviorTests(unittest.TestCase):
                 self.assertEqual(probed["GIT_CONFIG_GLOBAL"], "/dev/null")
                 self.assertEqual(probed["GIT_CONFIG_NOSYSTEM"], "1")
                 self.assertEqual(probed["GIT_ATTR_NOSYSTEM"], "1")
+                self.assertEqual(probed["GIT_OPTIONAL_LOCKS"], "0")
                 self.assertEqual(
                     probed["GIT_CEILING_DIRECTORIES"],
                     str(Path(os.path.realpath(repo)).parent),
@@ -594,8 +595,10 @@ class HashAllowlistBehaviorTests(unittest.TestCase):
                     "alias.ls-files=",
                     "alias.cat-file=",
                     "alias.config=",
+                    "--no-optional-locks",
                 ):
                     self.assertIn(flag, argv)
+                self.assertTrue(any(item.startswith("core.hooksPath=") for item in argv))
                 code, body, _echoed, _stderr = run_main(
                     runner,
                     allowlist,
@@ -889,3 +892,68 @@ class HashAllowlistBehaviorTests(unittest.TestCase):
         for place in ("info", "nested", "include"):
             with self.subTest(kind="clean", place=place):
                 refuse("clean", place)
+
+    def test_repo_hooks_do_not_run_or_refresh_the_index(self):
+        runner = load_script("runner.py", KIT)
+        source = "print('hook-ok')\n"
+        names = ("post-index-change", "reference-transaction", "pre-commit")
+
+        def check(name: str, place: str, dirty: bool) -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                repo = root / "repo"
+                script = commit_script(repo, source)
+                sentinel = root / "sentinel.txt"
+                hook_body = "#!/bin/sh\n" + "echo ran >> '" + str(sentinel).replace("'", "'\\''") + "'\n"
+                if place == "hooksPath":
+                    hook_dir = root / "alt-hooks"
+                    hook_dir.mkdir()
+                    hook = hook_dir / name
+                    hook.write_text(hook_body, encoding="utf-8")
+                    hook.chmod(hook.stat().st_mode | stat.S_IEXEC)
+                    git(repo, "config", "core.hooksPath", str(hook_dir))
+                else:
+                    hook = repo / ".git" / "hooks" / name
+                    hook.write_text(hook_body, encoding="utf-8")
+                    hook.chmod(hook.stat().st_mode | stat.S_IEXEC)
+                if dirty:
+                    (repo / "extra.txt").write_text("extra\n", encoding="utf-8")
+                allowlist = root / "allowlist.txt"
+                allowlist.write_text(runner.file_sha256(script) + "\n", encoding="utf-8")
+                index = repo / ".git" / "index"
+                before = index.read_bytes()
+                stamp = index.stat().st_mtime_ns
+                argv = runner.git_argv(repo, "status", "--porcelain")
+                self.assertIn("--no-optional-locks", argv)
+                hooks_args = [item for item in argv if item.startswith("core.hooksPath=")]
+                self.assertEqual(len(hooks_args), 1)
+                hooks_path = hooks_args[0].split("=", 1)[1]
+                self.assertTrue(os.path.isdir(hooks_path))
+                self.assertEqual(os.listdir(hooks_path), [])
+                self.assertNotEqual(
+                    os.path.realpath(hooks_path),
+                    os.path.realpath(repo / ".git" / "hooks"),
+                )
+                probed = runner.git_probe(
+                    repo, "status", "--porcelain", "--ignored", "--untracked-files=all"
+                )
+                self.assertEqual(probed.returncode, 0)
+                self.assertFalse(sentinel.exists())
+                self.assertEqual(index.read_bytes(), before)
+                self.assertEqual(index.stat().st_mtime_ns, stamp)
+                code, body, _echoed, _stderr = run_main(
+                    runner, allowlist, script, repo, root / "receipt.txt"
+                )
+                self.assertEqual(code, 1)
+                self.assertIn("decision: refuse", body)
+                self.assertIn("reason: unsafe-config", body)
+                self.assertNotIn("hook-ok", body)
+                self.assertFalse(sentinel.exists())
+                self.assertEqual(index.read_bytes(), before)
+                self.assertEqual(index.stat().st_mtime_ns, stamp)
+
+        for name in names:
+            for place in ("dotgit", "hooksPath"):
+                for dirty in (False, True):
+                    with self.subTest(name=name, place=place, dirty=dirty):
+                        check(name, place, dirty)

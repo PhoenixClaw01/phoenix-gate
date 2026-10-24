@@ -8,6 +8,8 @@ Ignored files, skip-worktree entries, and assume-unchanged entries count as a di
 
 A repo-local `filter.<name>.clean`, `smudge`, or `process` driver refuses with `unsafe-config` before `git status`. That includes a driver pulled in by the repo config. A `filter=` line in `.gitattributes` (any directory under `--root`) or in `info/attributes` refuses the same way. Every git call clears each discovered driver: `clean`, `smudge`, and `process` are set empty, and `required` is false, so the configured command does not run.
 
+Every git call also passes `--no-optional-locks`, sets `GIT_OPTIONAL_LOCKS=0`, and points `core.hooksPath` at an empty directory the runner creates. Repo hooks are not started, including `post-index-change` and a `core.hooksPath` value from repo config. The probe does not refresh the index. An executable file in `.git/hooks`, other than a `*.sample` file, or a configured `core.hooksPath`, refuses with `unsafe-config` before `git status`.
+
 The receipt is created as a new file before the script starts. An existing path, including a symlink, is not replaced or followed. The text is written through the export scrubber in the safe-helpers kit. The same generic patterns are removed, and an optional phrase file is applied the same way. The runner does not open the network.
 
 ## Allowlist

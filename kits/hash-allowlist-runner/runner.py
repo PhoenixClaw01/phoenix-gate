@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Run a script only when its sha256 is allowlisted and the git tree is clean.
 
-The work tree is checked first. A repo filter driver refuses before status.
+The work tree is checked first. A repo filter driver or hook refuses before
+status. Git calls do not start hooks and do not refresh the index.
 Only then are the script bytes read, and only when they match HEAD. Those
 bytes are what runs. The path is not executed.
 The receipt is passed through the safe-helpers export scrubber.
@@ -18,6 +19,7 @@ import os
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -172,6 +174,7 @@ def git_env(root: Path) -> dict[str, str]:
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
         "GIT_CEILING_DIRECTORIES": str(root_real.parent),
         "GIT_TERMINAL_PROMPT": "0",
         "LC_ALL": "C",
@@ -179,10 +182,31 @@ def git_env(root: Path) -> dict[str, str]:
     return env
 
 
-def _git_prefix(root: Path) -> list[str]:
-    """Hardened git invocation. Does not consult filter drivers."""
-    return [
+_EMPTY_HOOKS: str | None = None
+
+
+def _empty_hooks_dir() -> str:
+    """Empty directory used as core.hooksPath so repo hooks are not started."""
+    global _EMPTY_HOOKS
+    current = _EMPTY_HOOKS
+    if current is not None and os.path.isdir(current) and not os.listdir(current):
+        return current
+    path = tempfile.mkdtemp(prefix="allowlist-hooks-")
+    os.chmod(path, 0o700)
+    _EMPTY_HOOKS = path
+    return path
+
+
+def _git_prefix(root: Path, *, hooks: bool = True) -> list[str]:
+    """Hardened git invocation. Does not consult filter drivers or repo hooks."""
+    prefix = [
         "git",
+        "--no-optional-locks",
+    ]
+    if hooks:
+        # Omit this when asking git whether the repo itself sets core.hooksPath.
+        prefix.extend(["-c", "core.hooksPath=" + _empty_hooks_dir()])
+    prefix.extend([
         "-c",
         "core.fsmonitor=false",
         "-c",
@@ -199,7 +223,8 @@ def _git_prefix(root: Path) -> list[str]:
         "alias.config=",
         "-C",
         str(Path(os.path.realpath(root))),
-    ]
+    ])
+    return prefix
 
 
 def _filter_driver_name(key: str) -> str | None:
@@ -370,6 +395,108 @@ def _info_attributes_path(root_real: Path) -> Path | None:
     return None
 
 
+def _config_key_is_set(root: Path, key: str) -> bool | None:
+    """True when repo config sets key. False when unset. None when unreadable."""
+    failed = False
+    root_real = Path(os.path.realpath(root))
+    pattern = "^" + key.replace(".", r"\.") + "$"
+    for extra in (
+        ("--local", "--get-regexp", pattern),
+        ("--get-regexp", pattern),
+    ):
+        try:
+            probe = subprocess.run(
+                [*_git_prefix(root, hooks=False), "config", *extra],
+                capture_output=True,
+                encoding="utf-8",
+                errors="surrogateescape",
+                env=git_env(root),
+                cwd=str(root_real),
+                check=False,
+                shell=False,
+            )
+        except FileNotFoundError as exc:
+            raise RunnerError("git is missing") from exc
+        if probe.returncode == 0 and probe.stdout.strip():
+            return True
+        if probe.returncode == 1:
+            continue
+        if probe.returncode != 0:
+            failed = True
+    if failed:
+        return None
+    return False
+
+
+def _hooks_directory(root_real: Path) -> Path | None:
+    git_meta = root_real / ".git"
+    try:
+        info = git_meta.lstat()
+    except OSError:
+        return None
+    if stat.S_ISLNK(info.st_mode):
+        return git_meta
+    if stat.S_ISDIR(info.st_mode):
+        return git_meta / "hooks"
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    try:
+        fd = os.open(git_meta, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return git_meta
+    try:
+        raw = os.read(fd, 4096)
+    finally:
+        os.close(fd)
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        if line.startswith("gitdir: "):
+            git_dir = Path(line[len("gitdir: ") :].strip())
+            if not git_dir.is_absolute():
+                git_dir = root_real / git_dir
+            return git_dir / "hooks"
+    return None
+
+
+def _executable_hook_present(root: Path) -> bool:
+    """True when .git/hooks has an executable hook other than a *.sample file."""
+    hooks = _hooks_directory(Path(os.path.realpath(root)))
+    if hooks is None:
+        return False
+    try:
+        info = hooks.lstat()
+    except OSError:
+        return False
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    if not stat.S_ISDIR(info.st_mode):
+        return False
+    try:
+        names = os.listdir(hooks)
+    except OSError:
+        return True
+    for name in names:
+        if name.endswith(".sample") or name.startswith("."):
+            continue
+        path = hooks / name
+        try:
+            entry = path.lstat()
+        except OSError:
+            return True
+        if stat.S_ISLNK(entry.st_mode):
+            return True
+        if stat.S_ISREG(entry.st_mode) and entry.st_mode & 0o111:
+            return True
+    return False
+
+
+def repo_hooks_are_unsafe(root: Path) -> bool:
+    """Refuse when repo config selects hooks or an executable hook is installed."""
+    if _executable_hook_present(root):
+        return True
+    configured = _config_key_is_set(root, "core.hooksPath")
+    return configured is None or configured
+
+
 def attributes_select_filter(root: Path) -> bool:
     """True when attributes would select a clean, smudge, or process filter."""
     root_real = Path(os.path.realpath(root))
@@ -401,7 +528,12 @@ def tree_state(root: Path) -> str:
     top = probe.stdout.strip()
     if not top or os.path.realpath(top) != str(root_real):
         return "not-a-repo"
-    if drivers is None or drivers or attributes_select_filter(root):
+    if (
+        drivers is None
+        or drivers
+        or attributes_select_filter(root)
+        or repo_hooks_are_unsafe(root)
+    ):
         return "unsafe-config"
     status = git_probe(root, "status", "--porcelain", "--ignored", "--untracked-files=all")
     if status.returncode != 0:
