@@ -10,6 +10,8 @@ A repo-local `filter.<name>.clean`, `smudge`, or `process` driver refuses with `
 
 Every git call also passes `--no-optional-locks`, sets `GIT_OPTIONAL_LOCKS=0`, and points `core.hooksPath` at an empty directory the runner creates. Repo hooks are not started, including `post-index-change` and a `core.hooksPath` value from repo config. The probe does not refresh the index. An executable file in `.git/hooks`, other than a `*.sample` file, or a configured `core.hooksPath`, refuses with `unsafe-config` before `git status`.
 
+A linked worktree is checked in both places. `git rev-parse --git-common-dir` and `--git-path hooks` locate the common git dir and the hooks directory, and the per-worktree git dir is checked as well. An executable hook in either directory refuses. `config.worktree` (when `extensions.worktreeConfig` is set) and the common config are both read. A filter driver, `core.hooksPath`, or a worktree `core.fsmonitor` there refuses with `unsafe-config` before `git status`.
+
 The receipt is created as a new file before the script starts. An existing path, including a symlink, is not replaced or followed. The text is written through the export scrubber in the safe-helpers kit. The same generic patterns are removed, and an optional phrase file is applied the same way. The runner does not open the network.
 
 ## Allowlist

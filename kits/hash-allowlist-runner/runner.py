@@ -197,7 +197,7 @@ def _empty_hooks_dir() -> str:
     return path
 
 
-def _git_prefix(root: Path, *, hooks: bool = True) -> list[str]:
+def _git_prefix(root: Path, *, hooks: bool = True, fsmonitor: bool = True) -> list[str]:
     """Hardened git invocation. Does not consult filter drivers or repo hooks."""
     prefix = [
         "git",
@@ -206,9 +206,10 @@ def _git_prefix(root: Path, *, hooks: bool = True) -> list[str]:
     if hooks:
         # Omit this when asking git whether the repo itself sets core.hooksPath.
         prefix.extend(["-c", "core.hooksPath=" + _empty_hooks_dir()])
+    if fsmonitor:
+        # Omit this when asking git whether the repo itself sets core.fsmonitor.
+        prefix.extend(["-c", "core.fsmonitor=false"])
     prefix.extend([
-        "-c",
-        "core.fsmonitor=false",
         "-c",
         "core.untrackedCache=false",
         "-c",
@@ -428,44 +429,50 @@ def _config_key_is_set(root: Path, key: str) -> bool | None:
     return False
 
 
-def _hooks_directory(root_real: Path) -> Path | None:
-    git_meta = root_real / ".git"
+def _rev_parse_lines(root: Path, *args: str) -> list[str] | None:
+    """Absolute rev-parse output. None when git cannot answer."""
     try:
-        info = git_meta.lstat()
-    except OSError:
+        probe = subprocess.run(
+            [*_git_prefix(root, hooks=False), "rev-parse", *args],
+            capture_output=True,
+            encoding="utf-8",
+            errors="surrogateescape",
+            env=git_env(root),
+            cwd=str(Path(os.path.realpath(root))),
+            check=False,
+            shell=False,
+        )
+    except FileNotFoundError as exc:
+        raise RunnerError("git is missing") from exc
+    if probe.returncode != 0:
         return None
-    if stat.S_ISLNK(info.st_mode):
-        return git_meta
-    if stat.S_ISDIR(info.st_mode):
-        return git_meta / "hooks"
-    if not stat.S_ISREG(info.st_mode):
-        return None
-    try:
-        fd = os.open(git_meta, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    except OSError:
-        return git_meta
-    try:
-        raw = os.read(fd, 4096)
-    finally:
-        os.close(fd)
-    for line in raw.decode("utf-8", errors="replace").splitlines():
-        if line.startswith("gitdir: "):
-            git_dir = Path(line[len("gitdir: ") :].strip())
-            if not git_dir.is_absolute():
-                git_dir = root_real / git_dir
-            return git_dir / "hooks"
-    return None
+    lines = [line.strip() for line in probe.stdout.splitlines() if line.strip()]
+    return lines or None
 
 
-def _executable_hook_present(root: Path) -> bool:
-    """True when .git/hooks has an executable hook other than a *.sample file."""
-    hooks = _hooks_directory(Path(os.path.realpath(root)))
-    if hooks is None:
-        return False
+def _git_layout(root: Path) -> tuple[Path, Path, Path] | None:
+    """Per-worktree git dir, common git dir, and the hooks path git would use."""
+    lines = _rev_parse_lines(
+        root,
+        "--path-format=absolute",
+        "--absolute-git-dir",
+        "--git-common-dir",
+        "--git-path",
+        "hooks",
+    )
+    if lines is None or len(lines) < 3:
+        return None
+    return Path(lines[0]), Path(lines[1]), Path(lines[2])
+
+
+def _directory_has_executable_hook(hooks: Path) -> bool:
+    """True when this hooks directory has an executable hook other than *.sample."""
     try:
         info = hooks.lstat()
-    except OSError:
+    except FileNotFoundError:
         return False
+    except OSError:
+        return True
     if stat.S_ISLNK(info.st_mode):
         return True
     if not stat.S_ISDIR(info.st_mode):
@@ -489,9 +496,135 @@ def _executable_hook_present(root: Path) -> bool:
     return False
 
 
+def _config_text_is_unsafe(text: str, *, include_fsmonitor: bool) -> bool:
+    """True when an ini config selects a filter, hooksPath, or (optionally) fsmonitor."""
+    section = ""
+    subsection = ""
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith(("#", ";")):
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            body = stripped[1:-1].strip()
+            if " " in body:
+                name, _, rest = body.partition(" ")
+                section = name.strip().lower()
+                subsection = rest.strip().strip('"').lower()
+            else:
+                section = body.lower()
+                subsection = ""
+            continue
+        if "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip().lower()
+        if not value.strip():
+            continue
+        if section == "filter" and subsection and key in {"clean", "smudge", "process", "required"}:
+            return True
+        if section == "core" and key == "hookspath":
+            return True
+        if (
+            include_fsmonitor
+            and section == "core"
+            and key == "fsmonitor"
+            and value.strip().lower() not in {"false", "0"}
+        ):
+            return True
+    return False
+
+
+def _config_file_is_unsafe(path: Path, *, include_fsmonitor: bool) -> bool:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return True
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return True
+    try:
+        data = os.read(fd, 1024 * 1024 + 1)
+    finally:
+        os.close(fd)
+    if len(data) > 1024 * 1024:
+        return True
+    return _config_text_is_unsafe(
+        data.decode("utf-8", errors="replace"),
+        include_fsmonitor=include_fsmonitor,
+    )
+
+
+def _config_probe_is_unsafe(text: str, pattern: str) -> bool:
+    for line in text.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) < 2 or not parts[1].strip():
+            continue
+        if pattern.endswith("fsmonitor$") and parts[1].strip().lower() in {"false", "0"}:
+            continue
+        return True
+    return False
+
+
+def _worktree_git_config_is_unsafe(root: Path) -> bool:
+    """True when extensions.worktreeConfig exposes a filter, hooksPath, or fsmonitor."""
+    enabled = _config_key_is_set(root, "extensions.worktreeConfig")
+    if enabled is None:
+        return True
+    if not enabled:
+        return False
+    root_real = Path(os.path.realpath(root))
+    for pattern in (r"^filter\.", r"^core\.hooksPath$", r"^core\.fsmonitor$"):
+        try:
+            probe = subprocess.run(
+                [
+                    *_git_prefix(root, hooks=False, fsmonitor=False),
+                    "config",
+                    "--worktree",
+                    "--get-regexp",
+                    pattern,
+                ],
+                capture_output=True,
+                encoding="utf-8",
+                errors="surrogateescape",
+                env=git_env(root),
+                cwd=str(root_real),
+                check=False,
+                shell=False,
+            )
+        except FileNotFoundError as exc:
+            raise RunnerError("git is missing") from exc
+        if probe.returncode == 0 and _config_probe_is_unsafe(probe.stdout, pattern):
+            return True
+        if probe.returncode in (0, 1, 128):
+            continue
+        return True
+    return False
+
+
 def repo_hooks_are_unsafe(root: Path) -> bool:
-    """Refuse when repo config selects hooks or an executable hook is installed."""
-    if _executable_hook_present(root):
+    """Refuse when either git dir has an executable hook or selects hook config."""
+    layout = _git_layout(root)
+    if layout is None:
+        return True
+    git_dir, common, hooks_path = layout
+    seen: set[str] = set()
+    for directory in (git_dir / "hooks", common / "hooks", hooks_path):
+        identity = str(directory)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if _directory_has_executable_hook(directory):
+            return True
+    if _config_file_is_unsafe(common / "config", include_fsmonitor=False):
+        return True
+    if _config_file_is_unsafe(git_dir / "config.worktree", include_fsmonitor=True):
+        return True
+    if _worktree_git_config_is_unsafe(root):
         return True
     configured = _config_key_is_set(root, "core.hooksPath")
     return configured is None or configured
@@ -503,6 +636,12 @@ def attributes_select_filter(root: Path) -> bool:
     info_attributes = _info_attributes_path(root_real)
     if info_attributes is not None and _attributes_file_selects_filter(info_attributes):
         return True
+    layout = _git_layout(root)
+    if layout is not None:
+        git_dir, common, _hooks = layout
+        for extra in (common / "info" / "attributes", git_dir / "info" / "attributes"):
+            if _attributes_file_selects_filter(extra):
+                return True
     for dirpath, dirnames, filenames in os.walk(root_real, followlinks=False):
         kept: list[str] = []
         for name in dirnames:

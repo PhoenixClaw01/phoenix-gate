@@ -957,3 +957,84 @@ class HashAllowlistBehaviorTests(unittest.TestCase):
                 for dirty in (False, True):
                     with self.subTest(name=name, place=place, dirty=dirty):
                         check(name, place, dirty)
+
+    def test_linked_worktree_checks_the_common_git_dir(self):
+        runner = load_script("runner.py", KIT)
+        source = "print('worktree-ok')\n"
+
+        def linked_pair(root: Path) -> tuple[Path, Path]:
+            repo = root / "main"
+            script = commit_script(repo, source)
+            linked = root / "linked"
+            git(repo, "worktree", "add", "--detach", str(linked), "HEAD")
+            return repo, linked
+
+        def hook_script(path: Path, sentinel: Path) -> None:
+            quoted = "'" + str(sentinel).replace("'", "'\\''") + "'"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("#!/bin/sh\necho ran >> " + quoted + "\n", encoding="utf-8")
+            path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _repo, linked = linked_pair(root)
+            script = linked / "script.py"
+            allowlist = root / "allowlist.txt"
+            allowlist.write_text(runner.file_sha256(script) + "\n", encoding="utf-8")
+            code, body, _echoed, _stderr = run_main(
+                runner, allowlist, script, linked, root / "clean.txt"
+            )
+            self.assertEqual(code, 0)
+            self.assertIn("decision: allow", body)
+            self.assertIn("worktree-ok", body)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, linked = linked_pair(root)
+            sentinel = root / "sentinel.txt"
+            hook_script(repo / ".git" / "hooks" / "post-index-change", sentinel)
+            script = linked / "script.py"
+            allowlist = root / "allowlist.txt"
+            allowlist.write_text(runner.file_sha256(script) + "\n", encoding="utf-8")
+            code, body, _echoed, _stderr = run_main(
+                runner, allowlist, script, linked, root / "hook.txt"
+            )
+            self.assertEqual(code, 1)
+            self.assertIn("reason: unsafe-config", body)
+            self.assertNotIn("worktree-ok", body)
+            self.assertFalse(sentinel.exists())
+
+        for key, target in (
+            ("filter.sample.clean", "filter.sh"),
+            ("core.hooksPath", "alt-hooks"),
+            ("core.fsmonitor", "fsmonitor.sh"),
+        ):
+            with self.subTest(key=key):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    repo, linked = linked_pair(root)
+                    sentinel = root / "sentinel.txt"
+                    if key == "core.hooksPath":
+                        hook_dir = root / "alt-hooks"
+                        hook_script(hook_dir / "post-index-change", sentinel)
+                        value = str(hook_dir)
+                    else:
+                        command = root / target
+                        hook_script(command, sentinel)
+                        value = str(command)
+                    git(repo, "config", "extensions.worktreeConfig", "true")
+                    git(linked, "config", "--worktree", key, value)
+                    if key == "filter.sample.clean":
+                        (linked / ".gitattributes").write_text("* filter=sample\n", encoding="utf-8")
+                    if sentinel.exists():
+                        sentinel.unlink()
+                    script = linked / "script.py"
+                    allowlist = root / "allowlist.txt"
+                    allowlist.write_text(runner.file_sha256(script) + "\n", encoding="utf-8")
+                    code, body, _echoed, _stderr = run_main(
+                        runner, allowlist, script, linked, root / "cfg.txt"
+                    )
+                    self.assertEqual(code, 1)
+                    self.assertIn("reason: unsafe-config", body)
+                    self.assertNotIn("worktree-ok", body)
+                    self.assertFalse(sentinel.exists())
