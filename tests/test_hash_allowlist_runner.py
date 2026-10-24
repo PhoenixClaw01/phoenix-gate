@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import io
 import os
+import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -33,6 +36,44 @@ def git(repo: Path, *args: str) -> None:
     env["GIT_COMMITTER_NAME"] = "Example Keeper"
     env["GIT_COMMITTER_EMAIL"] = "keeper@example.com"
     subprocess.run(["git", *args], cwd=repo, check=True, env=env, capture_output=True, text=True)
+
+
+def run_main(runner, allowlist: Path, script: Path, root: Path, receipt: Path):
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with redirect_stdout(stdout), redirect_stderr(stderr):
+        code = runner.main(
+            [
+                "--allowlist",
+                str(allowlist),
+                "--script",
+                str(script),
+                "--root",
+                str(root),
+                "--receipt",
+                str(receipt),
+            ]
+        )
+    if receipt.is_symlink() or not receipt.exists():
+        body = ""
+    else:
+        body = receipt.read_text(encoding="utf-8")
+    return code, body, stdout.getvalue(), stderr.getvalue()
+
+
+def worktree_status(repo: Path) -> str:
+    env = os.environ.copy()
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CONFIG_GLOBAL"):
+        env.pop(key, None)
+    completed = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout
 
 
 def commit_script(repo: Path, source: str, name: str = "script.py") -> Path:
@@ -274,3 +315,353 @@ class HashAllowlistBehaviorTests(unittest.TestCase):
             "shell=True",
         ):
             self.assertNotIn(needle, text)
+
+    def test_hashed_bytes_run_when_the_path_changes(self):
+        runner = load_script("runner.py", KIT)
+        source = 'print("alpha")\nprint("FILE=" + __file__)\n'
+        beta = b'print("beta")\nprint("FILE=" + __file__)\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            script = commit_script(repo, source)
+            original = script.read_bytes()
+            allowlist = root / "allowlist.txt"
+            allowlist.write_text(hashlib.sha256(original).hexdigest() + "\n", encoding="utf-8")
+            receipt = root / "receipt.txt"
+            real_run = runner.subprocess.run
+            seen = []
+
+            def spy(argv, *args, **kwargs):
+                if argv and argv[0] != "git":
+                    script.write_bytes(beta)
+                    seen.append((list(argv), kwargs.get("input")))
+                return real_run(argv, *args, **kwargs)
+
+            runner.subprocess.run = spy
+            try:
+                code, body, echoed, _stderr = run_main(runner, allowlist, script, repo, receipt)
+            finally:
+                runner.subprocess.run = real_run
+            self.assertEqual(code, 0)
+            self.assertEqual(echoed, body)
+            self.assertEqual(script.read_bytes(), beta)
+            self.assertIn("alpha", body)
+            self.assertNotIn("beta", body)
+            self.assertIn("FILE=<stdin>", body)
+            self.assertIn("sha256: " + hashlib.sha256(original).hexdigest(), body)
+            self.assertEqual(seen, [(runner.child_command(), original)])
+            self.assertEqual(runner.child_command(), [sys.executable, "-I", "-B", "-"])
+
+    def test_symlinks_are_refused(self):
+        runner = load_script("runner.py", KIT)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            ran = repo / "ran.txt"
+            source = "from pathlib import Path\nPath('ran.txt').write_text('yes\\n', encoding='utf-8')\nprint('via-target')\n"
+            script = commit_script(repo, source)
+            link = repo / "link.py"
+            link.symlink_to(script.name)
+            git(repo, "add", "link.py")
+            git(repo, "commit", "-m", "add a linked name")
+            allowlist = root / "allowlist.txt"
+            allowlist.write_text(runner.file_sha256(script) + "\n", encoding="utf-8")
+            code, body, _echoed, _stderr = run_main(runner, allowlist, link, repo, root / "link-receipt.txt")
+            self.assertEqual(code, 1)
+            self.assertIn("reason: symlink", body)
+            self.assertIn("sha256: none", body)
+            self.assertNotIn("via-target", body)
+            self.assertFalse(ran.exists())
+
+            outside = root / "outside"
+            outside.mkdir()
+            marker = outside / "escaped.txt"
+            evil = outside / "evil.py"
+            evil.write_text(
+                "from pathlib import Path\n"
+                f"Path({str(marker)!r}).write_text('escaped-link\\n', encoding='utf-8')\n"
+                "print('escaped-link')\n",
+                encoding="utf-8",
+            )
+            bridge = repo / "sub"
+            bridge.symlink_to(outside, target_is_directory=True)
+            git(repo, "add", "sub")
+            git(repo, "commit", "-m", "add a linked directory")
+            allowlist.write_text(runner.file_sha256(evil) + "\n", encoding="utf-8")
+            code, body, _echoed, _stderr = run_main(
+                runner,
+                allowlist,
+                bridge / "evil.py",
+                repo,
+                root / "bridge-receipt.txt",
+            )
+            self.assertEqual(code, 1)
+            self.assertIn("reason: symlink", body)
+            self.assertIn("sha256: none", body)
+            self.assertNotIn("escaped-link", body)
+            self.assertFalse(marker.exists())
+            self.assertFalse(ran.exists())
+
+            target = root / "secret.txt"
+            target.write_text("kept\n", encoding="utf-8")
+            receipt_link = root / "receipt-link.txt"
+            receipt_link.symlink_to(target)
+            allowlist.write_text(runner.file_sha256(script) + "\n", encoding="utf-8")
+            code, body, _echoed, stderr = run_main(runner, allowlist, script, repo, receipt_link)
+            self.assertEqual(code, 2)
+            self.assertIn("receipt is a symlink", stderr)
+            self.assertEqual(target.read_text(encoding="utf-8"), "kept\n")
+            self.assertFalse(ran.exists())
+            self.assertEqual(body, "")
+
+            existing = root / "existing.txt"
+            existing.write_text("kept\n", encoding="utf-8")
+            code, _body, _echoed, stderr = run_main(runner, allowlist, script, repo, existing)
+            self.assertEqual(code, 2)
+            self.assertIn("receipt exists", stderr)
+            self.assertEqual(existing.read_text(encoding="utf-8"), "kept\n")
+            self.assertFalse(ran.exists())
+
+    def test_script_must_stay_inside_root(self):
+        runner = load_script("runner.py", KIT)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker = root / "pried.txt"
+            payload = (
+                "from pathlib import Path\n"
+                f"Path({str(marker)!r}).write_text('yes\\n', encoding='utf-8')\n"
+                "print('pried-open')\n"
+            )
+            outside = root / "outside.py"
+            outside.write_text(payload, encoding="utf-8")
+            repo = root / "repo"
+            commit_script(repo, "print('inside')\n")
+            sibling = Path(str(repo) + "-evil")
+            sibling.mkdir()
+            prefixed = sibling / "x.py"
+            prefixed.write_text(payload, encoding="utf-8")
+            allowlist = root / "allowlist.txt"
+            allowlist.write_text(runner.file_sha256(outside) + "\n", encoding="utf-8")
+            cases = (
+                ("sibling", outside),
+                ("parent", repo / ".." / "outside.py"),
+                ("prefix", prefixed),
+            )
+            for name, script in cases:
+                with self.subTest(name=name):
+                    code, body, _echoed, _stderr = run_main(
+                        runner,
+                        allowlist,
+                        script,
+                        repo,
+                        root / f"{name}-receipt.txt",
+                    )
+                    self.assertEqual(code, 1)
+                    self.assertIn("reason: outside-root", body)
+                    self.assertIn("sha256: none", body)
+                    self.assertNotIn("pried-open", body)
+                    self.assertFalse(marker.exists())
+
+    def test_ignored_and_index_flags_are_dirty(self):
+        runner = load_script("runner.py", KIT)
+        source = "from pathlib import Path\nPath('ran.txt').write_text('yes\\n', encoding='utf-8')\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            script = commit_script(repo, source)
+            allowlist = root / "allowlist.txt"
+            allowlist.write_text(runner.file_sha256(script) + "\n", encoding="utf-8")
+            (repo / ".gitignore").write_text("*.log\n", encoding="utf-8")
+            git(repo, "add", ".gitignore")
+            git(repo, "commit", "-m", "ignore logs")
+            (repo / "secret.log").write_text("hidden\n", encoding="utf-8")
+            self.assertEqual(worktree_status(repo), "")
+            code, body, _echoed, _stderr = run_main(runner, allowlist, script, repo, root / "ignored.txt")
+            self.assertEqual(code, 1)
+            self.assertIn("reason: dirty-tree", body)
+            self.assertFalse((repo / "ran.txt").exists())
+            (repo / "secret.log").unlink()
+
+            git(repo, "update-index", "--assume-unchanged", "script.py")
+            self.assertEqual(worktree_status(repo), "")
+            code, body, _echoed, _stderr = run_main(runner, allowlist, script, repo, root / "assume.txt")
+            self.assertEqual(code, 1)
+            self.assertIn("reason: dirty-tree", body)
+            self.assertFalse((repo / "ran.txt").exists())
+            git(repo, "update-index", "--no-assume-unchanged", "script.py")
+
+            git(repo, "update-index", "--skip-worktree", "script.py")
+            self.assertEqual(worktree_status(repo), "")
+            code, body, _echoed, _stderr = run_main(runner, allowlist, script, repo, root / "skip.txt")
+            self.assertEqual(code, 1)
+            self.assertIn("reason: dirty-tree", body)
+            self.assertFalse((repo / "ran.txt").exists())
+            git(repo, "update-index", "--no-skip-worktree", "script.py")
+
+            nested = repo / "nested"
+            nested.mkdir()
+            inner = nested / "inner.py"
+            inner.write_text(source, encoding="utf-8")
+            git(repo, "add", "nested/inner.py")
+            git(repo, "commit", "-m", "add nested script")
+            allowlist.write_text(runner.file_sha256(inner) + "\n", encoding="utf-8")
+            code, body, _echoed, _stderr = run_main(
+                runner,
+                allowlist,
+                inner,
+                nested,
+                root / "nested-receipt.txt",
+            )
+            self.assertEqual(code, 1)
+            self.assertIn("reason: not-a-repo", body)
+            self.assertFalse((nested / "ran.txt").exists())
+
+            allowlist.write_text(runner.file_sha256(script) + "\n", encoding="utf-8")
+            (repo / "extra.txt").write_text("untracked\n", encoding="utf-8")
+            clean = root / "clean"
+            commit_script(clean, "print('elsewhere')\n")
+            saved = os.environ.get("GIT_DIR")
+            os.environ["GIT_DIR"] = str(clean / ".git")
+            try:
+                code, body, _echoed, _stderr = run_main(
+                    runner,
+                    allowlist,
+                    script,
+                    repo,
+                    root / "gitdir-receipt.txt",
+                )
+            finally:
+                if saved is None:
+                    os.environ.pop("GIT_DIR", None)
+                else:
+                    os.environ["GIT_DIR"] = saved
+            self.assertEqual(code, 1)
+            self.assertIn("reason: dirty-tree", body)
+            self.assertFalse((repo / "ran.txt").exists())
+
+    def test_repo_helpers_are_not_executed(self):
+        runner = load_script("runner.py", KIT)
+        saved = os.environ.get("GIT_CONFIG_GLOBAL")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            script = commit_script(repo, "print('helper-ok')\n")
+            allowlist = root / "allowlist.txt"
+            allowlist.write_text(runner.file_sha256(script) + "\n", encoding="utf-8")
+            hook = root / "hook.sh"
+            marker = root / "marker.txt"
+            hook.write_text(f"#!/bin/sh\necho pwned >> {marker}\n", encoding="utf-8")
+            hook.chmod(hook.stat().st_mode | stat.S_IEXEC)
+            git(repo, "config", "core.fsmonitor", str(hook))
+            git(repo, "config", "alias.status", f"!{hook}")
+            git(repo, "config", "alias.rev-parse", f"!{hook}")
+            git(repo, "config", "alias.ls-files", f"!{hook}")
+            global_config = root / "global.gitconfig"
+            for key, value in (
+                ("core.fsmonitor", str(hook)),
+                ("alias.status", f"!{hook}"),
+                ("alias.rev-parse", f"!{hook}"),
+                ("alias.ls-files", f"!{hook}"),
+            ):
+                subprocess.run(
+                    ["git", "config", "--file", str(global_config), key, value],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            os.environ["GIT_CONFIG_GLOBAL"] = str(global_config)
+            try:
+                probed = runner.git_env(repo)
+                self.assertEqual(probed["GIT_CONFIG_GLOBAL"], "/dev/null")
+                self.assertEqual(probed["GIT_CONFIG_NOSYSTEM"], "1")
+                self.assertEqual(
+                    probed["GIT_CEILING_DIRECTORIES"],
+                    str(Path(os.path.realpath(repo)).parent),
+                )
+                for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "PYTHONPATH"):
+                    self.assertNotIn(key, probed)
+                argv = runner.git_argv(repo, "status")
+                for flag in (
+                    "core.fsmonitor=false",
+                    "core.untrackedCache=false",
+                    "alias.status=",
+                    "alias.rev-parse=",
+                    "alias.ls-files=",
+                ):
+                    self.assertIn(flag, argv)
+                code, body, _echoed, _stderr = run_main(
+                    runner,
+                    allowlist,
+                    script,
+                    repo,
+                    root / "receipt.txt",
+                )
+            finally:
+                if saved is None:
+                    os.environ.pop("GIT_CONFIG_GLOBAL", None)
+                else:
+                    os.environ["GIT_CONFIG_GLOBAL"] = saved
+            self.assertEqual(code, 0)
+            self.assertIn("decision: allow", body)
+            self.assertIn("helper-ok", body)
+            self.assertFalse(marker.exists())
+
+    def test_child_environment_is_minimal(self):
+        runner = load_script("runner.py", KIT)
+        keys = ("PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "LD_PRELOAD", "SENTINEL_PARENT")
+        saved = {key: os.environ.get(key) for key in keys}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            site = root / "site"
+            site.mkdir()
+            site_marker = root / "site-ran.txt"
+            (site / "sitecustomize.py").write_text(
+                "from pathlib import Path\n"
+                f"Path({str(site_marker)!r}).write_text('yes\\n', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            startup_marker = root / "startup-ran.txt"
+            startup = root / "startup.py"
+            startup.write_text(
+                "from pathlib import Path\n"
+                f"Path({str(startup_marker)!r}).write_text('yes\\n', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            home = root / "not-python"
+            home.mkdir()
+            lines = ["import os", "print('FILE=' + __file__)"]
+            for key in keys:
+                lines.append(f"print({key!r} + '=' + os.environ.get({key!r}, '<missing>'))")
+            repo = root / "repo"
+            script = commit_script(repo, "\n".join(lines) + "\n")
+            allowlist = root / "allowlist.txt"
+            allowlist.write_text(runner.file_sha256(script) + "\n", encoding="utf-8")
+            os.environ["PYTHONPATH"] = str(site)
+            os.environ["PYTHONSTARTUP"] = str(startup)
+            os.environ["PYTHONHOME"] = str(home)
+            os.environ["LD_PRELOAD"] = str(root / "nope.so")
+            os.environ["SENTINEL_PARENT"] = "present"
+            try:
+                child = runner.child_env()
+                for key in keys:
+                    self.assertNotIn(key, child)
+                code, body, _echoed, _stderr = run_main(
+                    runner,
+                    allowlist,
+                    script,
+                    repo,
+                    root / "receipt.txt",
+                )
+            finally:
+                for key, value in saved.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+            self.assertEqual(code, 0)
+            self.assertIn("decision: allow", body)
+            self.assertIn("FILE=<stdin>", body)
+            for key in keys:
+                self.assertIn(f"{key}=<missing>", body)
+            self.assertFalse(site_marker.exists())
+            self.assertFalse(startup_marker.exists())
