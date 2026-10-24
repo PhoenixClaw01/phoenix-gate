@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Run a script only when its sha256 is allowlisted and the git tree is clean.
 
-The work tree is checked first. Only then are the script bytes read, and only
-when they match HEAD. Those bytes are what runs. The path is not executed.
+The work tree is checked first. A repo filter driver refuses before status.
+Only then are the script bytes read, and only when they match HEAD. Those
+bytes are what runs. The path is not executed.
 The receipt is passed through the safe-helpers export scrubber.
 This script does not open the network.
 """
@@ -170,6 +171,7 @@ def git_env(root: Path) -> dict[str, str]:
         "PATH": os.environ.get("PATH", ""),
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_ATTR_NOSYSTEM": "1",
         "GIT_CEILING_DIRECTORIES": str(root_real.parent),
         "GIT_TERMINAL_PROMPT": "0",
         "LC_ALL": "C",
@@ -177,7 +179,8 @@ def git_env(root: Path) -> dict[str, str]:
     return env
 
 
-def git_argv(root: Path, *args: str) -> list[str]:
+def _git_prefix(root: Path) -> list[str]:
+    """Hardened git invocation. Does not consult filter drivers."""
     return [
         "git",
         "-c",
@@ -192,10 +195,84 @@ def git_argv(root: Path, *args: str) -> list[str]:
         "alias.ls-files=",
         "-c",
         "alias.cat-file=",
+        "-c",
+        "alias.config=",
         "-C",
         str(Path(os.path.realpath(root))),
-        *args,
     ]
+
+
+def _filter_driver_name(key: str) -> str | None:
+    if not key.startswith("filter."):
+        return None
+    rest = key[len("filter.") :]
+    for suffix in (".clean", ".smudge", ".process", ".required"):
+        if rest.endswith(suffix):
+            name = rest[: -len(suffix)]
+            if name and not name.startswith("-") and all(
+                char.isalnum() or char in "._-" for char in name
+            ):
+                return name
+            return None
+    return None
+
+
+def local_filter_drivers(root: Path) -> tuple[str, ...] | None:
+    """Repo filter drivers, including ones included from repo config.
+
+    None means the config could not be read. Exit 1 is an empty list.
+    This read does not run clean, smudge, or process commands.
+    """
+    names: set[str] = set()
+    failed = False
+    root_real = Path(os.path.realpath(root))
+    for extra in (
+        ("--local", "--get-regexp", r"^filter\."),
+        ("--get-regexp", r"^filter\."),
+    ):
+        try:
+            probe = subprocess.run(
+                [*_git_prefix(root), "config", *extra],
+                capture_output=True,
+                encoding="utf-8",
+                errors="surrogateescape",
+                env=git_env(root),
+                cwd=str(root_real),
+                check=False,
+                shell=False,
+            )
+        except FileNotFoundError as exc:
+            raise RunnerError("git is missing") from exc
+        if probe.returncode == 1:
+            continue
+        if probe.returncode != 0:
+            failed = True
+            continue
+        for line in probe.stdout.splitlines():
+            if not line.strip():
+                continue
+            name = _filter_driver_name(line.split()[0])
+            if name:
+                names.add(name)
+    if failed and not names:
+        return None
+    return tuple(sorted(names))
+
+
+def _filter_override_args(drivers: tuple[str, ...] | None) -> list[str]:
+    flags: list[str] = []
+    for name in drivers or ():
+        for key in ("clean", "smudge", "process"):
+            flags.extend(["-c", f"filter.{name}.{key}="])
+        flags.extend(["-c", f"filter.{name}.required=false"])
+    return flags
+
+
+def git_argv(root: Path, *args: str) -> list[str]:
+    prefix = _git_prefix(root)
+    overrides = _filter_override_args(local_filter_drivers(root))
+    # -C is the last prefix pair. Overrides stay in front of the subcommand.
+    return [*prefix[:-2], *overrides, *prefix[-2:], *args]
 
 
 def git_probe(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -226,15 +303,106 @@ def index_flags_are_dirty(text: str) -> bool:
     return False
 
 
-def tree_state(root: Path) -> str:
-    """Return clean, dirty, or not-a-repo. Git stays on this machine."""
+def _line_selects_filter(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return False
+    for token in stripped.split()[1:]:
+        if token.startswith(("!", "-")) or not token.startswith("filter="):
+            continue
+        if token.split("=", 1)[1]:
+            return True
+    return False
+
+
+def _attributes_file_selects_filter(path: Path) -> bool:
+    """True when this attributes file selects a filter, or cannot be read safely."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    if not stat.S_ISREG(info.st_mode):
+        return False
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return True
+    try:
+        data = os.read(fd, 1024 * 1024 + 1)
+    finally:
+        os.close(fd)
+    if len(data) > 1024 * 1024:
+        return True
+    text = data.decode("utf-8", errors="replace")
+    return any(_line_selects_filter(line) for line in text.splitlines())
+
+
+def _info_attributes_path(root_real: Path) -> Path | None:
+    git_meta = root_real / ".git"
+    try:
+        info = git_meta.lstat()
+    except OSError:
+        return None
+    if stat.S_ISLNK(info.st_mode):
+        return git_meta
+    if stat.S_ISDIR(info.st_mode):
+        return git_meta / "info" / "attributes"
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    try:
+        fd = os.open(git_meta, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return git_meta
+    try:
+        raw = os.read(fd, 4096)
+    finally:
+        os.close(fd)
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        if line.startswith("gitdir: "):
+            git_dir = Path(line[len("gitdir: ") :].strip())
+            if not git_dir.is_absolute():
+                git_dir = root_real / git_dir
+            return git_dir / "info" / "attributes"
+    return None
+
+
+def attributes_select_filter(root: Path) -> bool:
+    """True when attributes would select a clean, smudge, or process filter."""
     root_real = Path(os.path.realpath(root))
+    info_attributes = _info_attributes_path(root_real)
+    if info_attributes is not None and _attributes_file_selects_filter(info_attributes):
+        return True
+    for dirpath, dirnames, filenames in os.walk(root_real, followlinks=False):
+        kept: list[str] = []
+        for name in dirnames:
+            path = os.path.join(dirpath, name)
+            if name == ".git" or os.path.islink(path):
+                continue
+            kept.append(name)
+        dirnames[:] = kept
+        if ".gitattributes" in filenames and _attributes_file_selects_filter(
+            Path(dirpath) / ".gitattributes"
+        ):
+            return True
+    return False
+
+
+def tree_state(root: Path) -> str:
+    """Return clean, dirty, not-a-repo, or unsafe-config. Git stays on this machine."""
+    root_real = Path(os.path.realpath(root))
+    drivers = local_filter_drivers(root)
     probe = git_probe(root, "rev-parse", "--show-toplevel")
     if probe.returncode != 0:
         return "not-a-repo"
     top = probe.stdout.strip()
     if not top or os.path.realpath(top) != str(root_real):
         return "not-a-repo"
+    if drivers is None or drivers or attributes_select_filter(root):
+        return "unsafe-config"
     status = git_probe(root, "status", "--porcelain", "--ignored", "--untracked-files=all")
     if status.returncode != 0:
         return "not-a-repo"
@@ -307,7 +475,12 @@ def child_env() -> dict[str, str]:
 def decide(root: Path, script: Path, allowlist: list[str]) -> dict[str, object]:
     state = tree_state(root)
     if state != "clean":
-        reason = "dirty-tree" if state == "dirty" else "not-a-repo"
+        if state == "dirty":
+            reason = "dirty-tree"
+        elif state == "unsafe-config":
+            reason = "unsafe-config"
+        else:
+            reason = "not-a-repo"
         return _result("refuse", reason, "none", None, "", "")
     try:
         data = read_matching_head(root, script)

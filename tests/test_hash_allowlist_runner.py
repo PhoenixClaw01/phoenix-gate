@@ -557,6 +557,7 @@ class HashAllowlistBehaviorTests(unittest.TestCase):
             git(repo, "config", "alias.rev-parse", f"!{hook}")
             git(repo, "config", "alias.ls-files", f"!{hook}")
             git(repo, "config", "alias.cat-file", f"!{hook}")
+            git(repo, "config", "alias.config", f"!{hook}")
             global_config = root / "global.gitconfig"
             for key, value in (
                 ("core.fsmonitor", str(hook)),
@@ -564,6 +565,7 @@ class HashAllowlistBehaviorTests(unittest.TestCase):
                 ("alias.rev-parse", f"!{hook}"),
                 ("alias.ls-files", f"!{hook}"),
                 ("alias.cat-file", f"!{hook}"),
+                ("alias.config", f"!{hook}"),
             ):
                 subprocess.run(
                     ["git", "config", "--file", str(global_config), key, value],
@@ -576,6 +578,7 @@ class HashAllowlistBehaviorTests(unittest.TestCase):
                 probed = runner.git_env(repo)
                 self.assertEqual(probed["GIT_CONFIG_GLOBAL"], "/dev/null")
                 self.assertEqual(probed["GIT_CONFIG_NOSYSTEM"], "1")
+                self.assertEqual(probed["GIT_ATTR_NOSYSTEM"], "1")
                 self.assertEqual(
                     probed["GIT_CEILING_DIRECTORIES"],
                     str(Path(os.path.realpath(repo)).parent),
@@ -590,6 +593,7 @@ class HashAllowlistBehaviorTests(unittest.TestCase):
                     "alias.rev-parse=",
                     "alias.ls-files=",
                     "alias.cat-file=",
+                    "alias.config=",
                 ):
                     self.assertIn(flag, argv)
                 code, body, _echoed, _stderr = run_main(
@@ -807,3 +811,81 @@ class HashAllowlistBehaviorTests(unittest.TestCase):
             self.assertIn("sha256: none", body)
             self.assertNotIn("untracked-ran", body)
             self.assertFalse((repo / "ran.txt").exists())
+
+    def test_repo_filter_drivers_do_not_run(self):
+        runner = load_script("runner.py", KIT)
+        source = (
+            "from pathlib import Path\n"
+            "Path('ran.txt').write_text('yes\\n', encoding='utf-8')\n"
+            "print('filter-ok')\n"
+        )
+
+        def refuse(kind: str, place: str) -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                repo = root / "repo"
+                script = commit_script(repo, source)
+                sentinel = root / "sentinel.txt"
+                hook = root / "filter.sh"
+                quoted = "'" + str(sentinel).replace("'", "'\\''") + "'"
+                hook.write_text(
+                    "#!/bin/sh\n"
+                    f"echo ran >> {quoted}\n"
+                    "cat\n",
+                    encoding="utf-8",
+                )
+                hook.chmod(hook.stat().st_mode | stat.S_IEXEC)
+                if place == "include":
+                    included = root / "included.gitconfig"
+                    included.write_text(
+                        f"[filter \"sample\"]\n\t{kind} = {hook}\n",
+                        encoding="utf-8",
+                    )
+                    git(repo, "config", "include.path", str(included))
+                else:
+                    git(repo, "config", f"filter.sample.{kind}", str(hook))
+                if place == "info":
+                    info = repo / ".git" / "info"
+                    info.mkdir(parents=True, exist_ok=True)
+                    (info / "attributes").write_text("* filter=sample\n", encoding="utf-8")
+                elif place == "nested":
+                    nested = repo / "sub"
+                    nested.mkdir()
+                    (nested / ".gitattributes").write_text("* filter=sample\n", encoding="utf-8")
+                    (nested / "note.txt").write_text("note\n", encoding="utf-8")
+                    git(repo, "add", "sub")
+                    git(repo, "commit", "-m", "select sample filter")
+                else:
+                    (repo / ".gitattributes").write_text("* filter=sample\n", encoding="utf-8")
+                    git(repo, "add", ".gitattributes")
+                    git(repo, "commit", "-m", "select sample filter")
+                if sentinel.exists():
+                    sentinel.unlink()
+                allowlist = root / "allowlist.txt"
+                allowlist.write_text(runner.file_sha256(script) + "\n", encoding="utf-8")
+                argv = runner.git_argv(repo, "status")
+                for flag in (
+                    "filter.sample.clean=",
+                    "filter.sample.smudge=",
+                    "filter.sample.process=",
+                    "filter.sample.required=false",
+                ):
+                    self.assertIn(flag, argv)
+                self.assertFalse(sentinel.exists())
+                code, body, _echoed, _stderr = run_main(
+                    runner, allowlist, script, repo, root / f"{kind}-{place}.txt"
+                )
+                self.assertEqual(code, 1)
+                self.assertIn("decision: refuse", body)
+                self.assertIn("reason: unsafe-config", body)
+                self.assertIn("sha256: none", body)
+                self.assertNotIn("filter-ok", body)
+                self.assertFalse(sentinel.exists())
+                self.assertFalse((repo / "ran.txt").exists())
+
+        for kind in ("clean", "smudge", "process"):
+            with self.subTest(kind=kind, place="root"):
+                refuse(kind, "root")
+        for place in ("info", "nested", "include"):
+            with self.subTest(kind="clean", place=place):
+                refuse("clean", place)
