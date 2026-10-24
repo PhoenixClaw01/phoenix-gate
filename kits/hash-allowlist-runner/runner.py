@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Run a script only when its sha256 is allowlisted and the git tree is clean.
 
-The bytes that were hashed are what runs. The path is not executed.
+The work tree is checked first. Only then are the script bytes read, and only
+when they match HEAD. Those bytes are what runs. The path is not executed.
 The receipt is passed through the safe-helpers export scrubber.
 This script does not open the network.
 """
@@ -189,6 +190,8 @@ def git_argv(root: Path, *args: str) -> list[str]:
         "alias.rev-parse=",
         "-c",
         "alias.ls-files=",
+        "-c",
+        "alias.cat-file=",
         "-C",
         str(Path(os.path.realpath(root))),
         *args,
@@ -245,6 +248,45 @@ def tree_state(root: Path) -> str:
     return "clean"
 
 
+def head_blob(root: Path, rel: Path) -> bytes | None:
+    """Bytes of HEAD:rel, or None when that path is not a blob in HEAD."""
+    spec = "HEAD:" + rel.as_posix()
+    try:
+        probe = subprocess.run(
+            git_argv(root, "cat-file", "blob", spec),
+            capture_output=True,
+            env=git_env(root),
+            cwd=str(Path(os.path.realpath(root))),
+            check=False,
+            shell=False,
+        )
+    except FileNotFoundError as exc:
+        raise RunnerError("git is missing") from exc
+    if probe.returncode != 0:
+        return None
+    return probe.stdout
+
+
+def read_matching_head(root: Path, script: Path) -> bytes:
+    """Two no-follow reads, equal to each other and to the HEAD blob."""
+    rel = lexical_relative(root, script)
+    if rel is None:
+        raise ScriptRejected("outside-root")
+    first = read_under_root(root, script)
+    try:
+        second = read_under_root(root, script)
+    except RunnerError as exc:
+        raise ScriptRejected("changed") from exc
+    if first != second:
+        raise ScriptRejected("changed")
+    blob = head_blob(root, rel)
+    if blob is None:
+        raise ScriptRejected("not-in-head")
+    if blob != first:
+        raise ScriptRejected("changed")
+    return first
+
+
 def child_command() -> list[str]:
     return [sys.executable, "-I", "-B", "-"]
 
@@ -263,15 +305,15 @@ def child_env() -> dict[str, str]:
 
 
 def decide(root: Path, script: Path, allowlist: list[str]) -> dict[str, object]:
-    try:
-        data = read_under_root(root, script)
-    except ScriptRejected as exc:
-        return _result("refuse", exc.reason, "none", None, "", "")
-    digest = hashlib.sha256(data).hexdigest()
     state = tree_state(root)
     if state != "clean":
         reason = "dirty-tree" if state == "dirty" else "not-a-repo"
-        return _result("refuse", reason, digest, None, "", "")
+        return _result("refuse", reason, "none", None, "", "")
+    try:
+        data = read_matching_head(root, script)
+    except ScriptRejected as exc:
+        return _result("refuse", exc.reason, "none", None, "", "")
+    digest = hashlib.sha256(data).hexdigest()
     if digest not in allowlist:
         return _result("refuse", "not-allowlisted", digest, None, "", "")
     completed = subprocess.run(

@@ -556,12 +556,14 @@ class HashAllowlistBehaviorTests(unittest.TestCase):
             git(repo, "config", "alias.status", f"!{hook}")
             git(repo, "config", "alias.rev-parse", f"!{hook}")
             git(repo, "config", "alias.ls-files", f"!{hook}")
+            git(repo, "config", "alias.cat-file", f"!{hook}")
             global_config = root / "global.gitconfig"
             for key, value in (
                 ("core.fsmonitor", str(hook)),
                 ("alias.status", f"!{hook}"),
                 ("alias.rev-parse", f"!{hook}"),
                 ("alias.ls-files", f"!{hook}"),
+                ("alias.cat-file", f"!{hook}"),
             ):
                 subprocess.run(
                     ["git", "config", "--file", str(global_config), key, value],
@@ -587,6 +589,7 @@ class HashAllowlistBehaviorTests(unittest.TestCase):
                     "alias.status=",
                     "alias.rev-parse=",
                     "alias.ls-files=",
+                    "alias.cat-file=",
                 ):
                     self.assertIn(flag, argv)
                 code, body, _echoed, _stderr = run_main(
@@ -665,3 +668,142 @@ class HashAllowlistBehaviorTests(unittest.TestCase):
                 self.assertIn(f"{key}=<missing>", body)
             self.assertFalse(site_marker.exists())
             self.assertFalse(startup_marker.exists())
+
+    def test_restore_after_read_refuses(self):
+        runner = load_script("runner.py", KIT)
+        committed = "print('head-copy')\n"
+        swapped = (
+            "from pathlib import Path\n"
+            "Path('ran.txt').write_text('yes\\n', encoding='utf-8')\n"
+            "print('swapped')\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            script = commit_script(repo, committed)
+            committed_bytes = script.read_bytes()
+            swapped_bytes = swapped.encode("utf-8")
+            script.write_bytes(swapped_bytes)
+            allowlist = root / "allowlist.txt"
+            allowlist.write_text(
+                hashlib.sha256(committed_bytes).hexdigest()
+                + "\n"
+                + hashlib.sha256(swapped_bytes).hexdigest()
+                + "\n",
+                encoding="utf-8",
+            )
+            real_read = runner.read_under_root
+
+            def restore_after(root_arg, script_arg):
+                data = real_read(root_arg, script_arg)
+                script.write_bytes(committed_bytes)
+                return data
+
+            runner.read_under_root = restore_after
+            try:
+                code, body, _echoed, _stderr = run_main(
+                    runner, allowlist, script, repo, root / "receipt.txt"
+                )
+            finally:
+                runner.read_under_root = real_read
+            self.assertEqual(code, 1)
+            self.assertIn("reason: dirty-tree", body)
+            self.assertNotIn("swapped", body)
+            self.assertNotIn("head-copy", body)
+            self.assertFalse((repo / "ran.txt").exists())
+
+            script.write_bytes(swapped_bytes)
+            real_state = runner.tree_state
+            runner.tree_state = lambda _root: "clean"
+            runner.read_under_root = restore_after
+            try:
+                code, body, _echoed, _stderr = run_main(
+                    runner, allowlist, script, repo, root / "forced.txt"
+                )
+            finally:
+                runner.tree_state = real_state
+                runner.read_under_root = real_read
+            self.assertEqual(code, 1)
+            self.assertIn("reason: changed", body)
+            self.assertIn("sha256: none", body)
+            self.assertNotIn("swapped", body)
+            self.assertNotIn("head-copy", body)
+            self.assertFalse((repo / "ran.txt").exists())
+
+    def test_delete_untracked_after_read_refuses(self):
+        runner = load_script("runner.py", KIT)
+        payload = (
+            "from pathlib import Path\n"
+            "Path('ran.txt').write_text('yes\\n', encoding='utf-8')\n"
+            "print('extra-ran')\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            commit_script(repo, "print('placeholder')\n")
+            extra = repo / "extra.py"
+            extra.write_text(payload, encoding="utf-8")
+            allowlist = root / "allowlist.txt"
+            allowlist.write_text(
+                hashlib.sha256(payload.encode("utf-8")).hexdigest() + "\n",
+                encoding="utf-8",
+            )
+            real_read = runner.read_under_root
+
+            def delete_after(root_arg, script_arg):
+                data = real_read(root_arg, script_arg)
+                if extra.exists():
+                    extra.unlink()
+                return data
+
+            runner.read_under_root = delete_after
+            try:
+                code, body, _echoed, _stderr = run_main(
+                    runner, allowlist, extra, repo, root / "receipt.txt"
+                )
+            finally:
+                runner.read_under_root = real_read
+            self.assertEqual(code, 1)
+            self.assertIn("reason: dirty-tree", body)
+            self.assertNotIn("extra-ran", body)
+            self.assertFalse((repo / "ran.txt").exists())
+
+    def test_untracked_allowlisted_script_refuses(self):
+        runner = load_script("runner.py", KIT)
+        payload = (
+            "from pathlib import Path\n"
+            "Path('ran.txt').write_text('yes\\n', encoding='utf-8')\n"
+            "print('untracked-ran')\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            commit_script(repo, "print('placeholder')\n")
+            extra = repo / "extra.py"
+            extra.write_text(payload, encoding="utf-8")
+            allowlist = root / "allowlist.txt"
+            allowlist.write_text(
+                hashlib.sha256(payload.encode("utf-8")).hexdigest() + "\n",
+                encoding="utf-8",
+            )
+            code, body, _echoed, _stderr = run_main(
+                runner, allowlist, extra, repo, root / "receipt.txt"
+            )
+            self.assertEqual(code, 1)
+            self.assertIn("reason: dirty-tree", body)
+            self.assertNotIn("untracked-ran", body)
+            self.assertFalse((repo / "ran.txt").exists())
+
+            real_state = runner.tree_state
+            runner.tree_state = lambda _root: "clean"
+            try:
+                code, body, _echoed, _stderr = run_main(
+                    runner, allowlist, extra, repo, root / "forced.txt"
+                )
+            finally:
+                runner.tree_state = real_state
+            self.assertEqual(code, 1)
+            self.assertIn("reason: not-in-head", body)
+            self.assertIn("sha256: none", body)
+            self.assertNotIn("untracked-ran", body)
+            self.assertFalse((repo / "ran.txt").exists())

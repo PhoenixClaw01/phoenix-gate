@@ -1,8 +1,8 @@
 # Hash allowlist runner
 
-A small runner. It executes a Python script only when the script file's sha256 is in an allowlist and the git work tree is clean. A dirty tree, a tree that is not the git toplevel, a hash that is not listed, a symlink, or a path outside `--root` refuses before the script starts.
+A small runner. It executes a Python script only when the script file's sha256 is in an allowlist and the git work tree is clean. A dirty tree, a tree that is not the git toplevel, a hash that is not listed, a symlink, a path outside `--root`, or a path that is not the blob at HEAD refuses before the script starts.
 
-The runner opens the script without following a symlink, reads the bytes once, and hashes those bytes. Those bytes are the program. They are passed to `python -I -B -`. The path is not executed. The script has to be a regular file inside `--root`, with no symlink in between.
+The work tree is checked first, including ignored files and index flags. Only a clean tree is read. The runner opens the script without following a symlink, reads it again, and requires the two reads to be the same bytes. Those bytes must equal `git cat-file blob HEAD:<path>` for that path inside `--root`. The same git probe is used: no repo aliases, no filesystem monitor, and not the caller's git configuration. A path that is not in HEAD is refused, so an untracked file never runs. The matching bytes are hashed, and that same buffer is passed to `python -I -B -`. The path is not executed. The script has to be a regular file inside `--root`, with no symlink in between.
 
 Ignored files, skip-worktree entries, and assume-unchanged entries count as a dirty tree. The git probe does not use repo aliases, a filesystem monitor, or the caller's git configuration.
 
@@ -33,7 +33,7 @@ When `--phrases` is omitted, `phrases.local.txt` in the current directory is use
 | code | meaning |
 | --- | --- |
 | 0 | The script ran and exited 0. The receipt says `decision: allow`. |
-| 1 | Refused (`dirty-tree`, `not-a-repo`, `not-allowlisted`, `symlink`, `outside-root`, or `not-a-file`), or the script ran and exited non-zero. |
+| 1 | Refused (`dirty-tree`, `not-a-repo`, `not-allowlisted`, `symlink`, `outside-root`, `not-a-file`, `changed`, or `not-in-head`), or the script ran and exited non-zero. |
 | 2 | The allowlist, script, root, receipt path, phrase file, or scrubber is missing or not usable. |
 
 Stdout is the redacted receipt. The same text is written to `--receipt`.
