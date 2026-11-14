@@ -19,6 +19,8 @@ from pathlib import Path
 
 SHA_RE = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{40}|[0-9a-fA-F]{64})(?![0-9a-fA-F])")
 VERDICT_RE = re.compile(r"PASS|FAIL", re.IGNORECASE)
+# Same id rule as the red-team verdict check: one lowercase token.
+ID_RE = re.compile(r"[a-z][a-z0-9-]{0,63}")
 
 
 class GateError(Exception):
@@ -58,21 +60,30 @@ class VerdictRecord:
         blocking_open: bool = False,
         author_id: str | None = None,
         reviewer_id: str | None = None,
+        author_set: bool = False,
+        reviewer_set: bool = False,
     ) -> None:
         self.verdict = verdict
         self.sha = sha
         self.blocking_open = blocking_open
         self.author_id = author_id
         self.reviewer_id = reviewer_id
+        self.author_set = author_set
+        self.reviewer_set = reviewer_set
 
 
 def _optional_id(value: object) -> str | None:
+    """Strip, then keep only an id the red-team verdict check would accept."""
     if value is None:
         return None
     if not isinstance(value, str):
         raise GateError("bad-verdict")
     token = value.strip()
-    return token or None
+    if not token:
+        return None
+    if ID_RE.fullmatch(token) is None:
+        raise GateError("bad-verdict")
+    return token
 
 
 def _blocking_open(value: object) -> bool:
@@ -126,6 +137,8 @@ def _record_from_json(data: dict) -> VerdictRecord | None:
         blocking_open=blocking_open,
         author_id=author_id,
         reviewer_id=reviewer_id,
+        author_set=author_id is not None or "author_id" in data,
+        reviewer_set=reviewer_id is not None or "reviewer_id" in data,
     )
 
 
@@ -136,18 +149,43 @@ def _parse_text(text: str) -> list[VerdictRecord]:
     saw_sha = False
     pending_author: str | None = None
     pending_reviewer: str | None = None
+    pending_author_set = False
+    pending_reviewer_set = False
     pending_blocking = False
 
-    def take_side() -> tuple[bool, str | None, str | None]:
-        nonlocal pending_author, pending_reviewer, pending_blocking
-        side = (pending_blocking, pending_author, pending_reviewer)
+    def set_author(value: str) -> None:
+        nonlocal pending_author, pending_author_set
+        if pending_author_set:
+            raise GateError("duplicate-id")
+        pending_author = _optional_id(value)
+        pending_author_set = True
+
+    def set_reviewer(value: str) -> None:
+        nonlocal pending_reviewer, pending_reviewer_set
+        if pending_reviewer_set:
+            raise GateError("duplicate-id")
+        pending_reviewer = _optional_id(value)
+        pending_reviewer_set = True
+
+    def take_side() -> tuple[bool, str | None, str | None, bool, bool]:
+        nonlocal pending_author, pending_reviewer, pending_author_set, pending_reviewer_set
+        nonlocal pending_blocking
+        side = (
+            pending_blocking,
+            pending_author,
+            pending_reviewer,
+            pending_author_set,
+            pending_reviewer_set,
+        )
         pending_author = None
         pending_reviewer = None
+        pending_author_set = False
+        pending_reviewer_set = False
         pending_blocking = False
         return side
 
     def emit(verdict: str, sha: str | None) -> None:
-        blocking_open, author_id, reviewer_id = take_side()
+        blocking_open, author_id, reviewer_id, author_set, reviewer_set = take_side()
         records.append(
             VerdictRecord(
                 verdict,
@@ -155,6 +193,8 @@ def _parse_text(text: str) -> list[VerdictRecord]:
                 blocking_open=blocking_open,
                 author_id=author_id,
                 reviewer_id=reviewer_id,
+                author_set=author_set,
+                reviewer_set=reviewer_set,
             )
         )
 
@@ -177,10 +217,10 @@ def _parse_text(text: str) -> list[VerdictRecord]:
             continue
         lower = raw.lower()
         if lower.startswith("author_id:"):
-            pending_author = _optional_id(raw.split(":", 1)[1])
+            set_author(raw.split(":", 1)[1])
             continue
         if lower.startswith("reviewer_id:"):
-            pending_reviewer = _optional_id(raw.split(":", 1)[1])
+            set_reviewer(raw.split(":", 1)[1])
             continue
         if lower.startswith("blocking:"):
             pending_blocking = _text_blocking(raw.split(":", 1)[1])
@@ -211,14 +251,18 @@ def _parse_text(text: str) -> list[VerdictRecord]:
         flush()
         emit(verdict, find_sha(raw))
     flush()
-    if records and (pending_blocking or pending_author is not None or pending_reviewer is not None):
+    if records and (pending_blocking or pending_author_set or pending_reviewer_set):
         last = records[-1]
+        if (last.author_set and pending_author_set) or (last.reviewer_set and pending_reviewer_set):
+            raise GateError("duplicate-id")
         records[-1] = VerdictRecord(
             last.verdict,
             last.sha,
             blocking_open=last.blocking_open or pending_blocking,
-            author_id=last.author_id if last.author_id is not None else pending_author,
-            reviewer_id=last.reviewer_id if last.reviewer_id is not None else pending_reviewer,
+            author_id=pending_author if pending_author_set else last.author_id,
+            reviewer_id=pending_reviewer if pending_reviewer_set else last.reviewer_id,
+            author_set=last.author_set or pending_author_set,
+            reviewer_set=last.reviewer_set or pending_reviewer_set,
         )
     return records
 
@@ -308,7 +352,19 @@ def main(argv: list[str] | None = None, *, cwd: Path | None = None) -> int:
         return 2
     try:
         records = parse_verdict(verdict_path.read_text(encoding="utf-8"))
-    except (GateError, UnicodeDecodeError):
+    except UnicodeDecodeError:
+        print("verdict is not readable", file=sys.stderr)
+        return 2
+    except GateError as exc:
+        if exc.reason == "duplicate-id":
+            result = {
+                "decision": "refuse",
+                "reason": "duplicate-id",
+                "head": head,
+                "approved": False,
+            }
+            print(format_result(result, dry_run=args.dry_run), end="")
+            return 1
         print("verdict is not readable", file=sys.stderr)
         return 2
     result = evaluate(records, head)

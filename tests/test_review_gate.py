@@ -330,6 +330,116 @@ class ReviewGateTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("reason: pass", stdout)
 
+    def test_author_ids_follow_the_verdict_id_rule(self):
+        module = load_script()
+        verdict_path = ROOT / "kits" / "red-team" / "verdict.py"
+        spec = importlib.util.spec_from_file_location("red_team_verdict_ids", verdict_path)
+        verdict = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(verdict)
+        self.assertEqual(module.ID_RE.pattern, verdict.ID_RE.pattern)
+        disguised = (
+            "Author-one",
+            "\u0430uthor-one",
+            "author\u200b-one",
+        )
+        for reviewer_id in disguised:
+            with self.assertRaises(verdict.RedTeamError):
+                verdict.check_id(reviewer_id)
+            payload = {
+                "verdict": "PASS",
+                "sha": HEAD,
+                "author_id": "author-one",
+                "reviewer_id": reviewer_id,
+            }
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "verdict.json"
+                path.write_text(json.dumps(payload), encoding="utf-8")
+                code, stdout, stderr = run_main(module, ["--verdict", str(path), "--head", HEAD])
+            self.assertEqual(code, 2, reviewer_id)
+            self.assertIn("not readable", stderr)
+            self.assertNotIn("approved: true", stdout)
+        padded = {
+            "verdict": "PASS",
+            "sha": HEAD,
+            "author_id": " author-one ",
+            "reviewer_id": "author-one",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "padded.json"
+            path.write_text(json.dumps(padded), encoding="utf-8")
+            code, stdout, _stderr = run_main(module, ["--verdict", str(path), "--head", HEAD])
+        self.assertEqual(code, 1)
+        self.assertIn("reason: author-is-reviewer", stdout)
+        self.assertIn("approved: false", stdout)
+
+    def test_a_later_id_pair_cannot_hide_or_clear_a_reviewer(self):
+        module = load_script()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hidden = root / "hidden.txt"
+            hidden.write_text(
+                "\n".join(
+                    [
+                        "author_id: author-one",
+                        "reviewer_id: reviewer-alpha",
+                        f"PASS {HEAD}",
+                        "author_id: author-one",
+                        "reviewer_id: author-one",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            cleared = root / "cleared.txt"
+            cleared.write_text(
+                "\n".join(
+                    [
+                        "author_id: author-one",
+                        "reviewer_id: author-one",
+                        f"PASS {HEAD}",
+                        "author_id: author-one",
+                        "reviewer_id: reviewer-alpha",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            only_later = root / "later.txt"
+            only_later.write_text(
+                "\n".join(
+                    [
+                        f"PASS {HEAD}",
+                        "author_id: author-one",
+                        "reviewer_id: author-one",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            repeated = root / "repeated.txt"
+            repeated.write_text(
+                "\n".join(
+                    [
+                        "reviewer_id: reviewer-alpha",
+                        "reviewer_id: author-one",
+                        "author_id: author-one",
+                        f"PASS {HEAD}",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            for path in (hidden, cleared, repeated):
+                code, stdout, _stderr = run_main(module, ["--verdict", str(path), "--head", HEAD])
+                self.assertEqual(code, 1, path.name)
+                self.assertIn("reason: duplicate-id", stdout)
+                self.assertIn("approved: false", stdout)
+                self.assertNotIn("reason: pass", stdout)
+            code, stdout, _stderr = run_main(module, ["--verdict", str(only_later), "--head", HEAD])
+            self.assertEqual(code, 1)
+            self.assertIn("reason: author-is-reviewer", stdout)
+            self.assertIn("approved: false", stdout)
+
     def test_script_does_not_open_the_network(self):
         text = (KIT / "review_gate.py").read_text(encoding="utf-8")
         for needle in (
