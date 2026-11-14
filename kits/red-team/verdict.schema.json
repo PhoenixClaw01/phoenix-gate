@@ -1,0 +1,101 @@
+{
+  "title": "Red-team verdict",
+  "description": "One PASS or FAIL pinned to a head SHA. head_sha and sha are the same commit, so a review gate can read this file. reviewer_id and author_id differ. PASS requires an empty blocking list. FAIL requires at least one blocking finding. Kintsugi items are repairs and do not block.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "repo",
+    "pr",
+    "head_sha",
+    "sha",
+    "verdict",
+    "blocking",
+    "kintsugi",
+    "reviewer_id",
+    "author_id",
+    "timestamp"
+  ],
+  "properties": {
+    "repo": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "pr": {
+      "oneOf": [
+        { "type": "integer", "minimum": 1 },
+        { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,63}$" }
+      ]
+    },
+    "head_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$",
+      "description": "Commit that was reviewed."
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$",
+      "description": "Same commit as head_sha. The review gate reads this field."
+    },
+    "verdict": {
+      "enum": ["PASS", "FAIL"]
+    },
+    "blocking": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "summary"],
+        "properties": {
+          "kind": { "enum": ["attacker-reachable", "leak"] },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 240 }
+        }
+      }
+    },
+    "kintsugi": {
+      "type": "array",
+      "description": "Repairs that stay visible. Each item has a size. None of these block.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["repair", "size"],
+        "properties": {
+          "repair": { "type": "string", "minLength": 1, "maxLength": 240 },
+          "size": { "enum": ["small", "medium", "large"] }
+        }
+      }
+    },
+    "reviewer_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,63}$"
+    },
+    "author_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,63}$",
+      "description": "Must differ from reviewer_id."
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "verdict": { "const": "PASS" } },
+        "required": ["verdict"]
+      },
+      "then": {
+        "properties": { "blocking": { "maxItems": 0 } }
+      }
+    },
+    {
+      "if": {
+        "properties": { "verdict": { "const": "FAIL" } },
+        "required": ["verdict"]
+      },
+      "then": {
+        "properties": { "blocking": { "minItems": 1 } }
+      }
+    }
+  ]
+}
