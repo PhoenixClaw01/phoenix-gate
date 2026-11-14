@@ -1,6 +1,7 @@
 {
   "title": "Red-team verdict",
-  "description": "One PASS or FAIL pinned to a head SHA. head_sha and sha are the same commit, so a review gate can read this file. reviewer_id and author_id differ. PASS requires an empty blocking list. FAIL requires at least one blocking finding. Kintsugi items are repairs and do not block.",
+  "description": "One PASS or FAIL pinned to a head SHA. head_sha and sha are the same commit, so a review gate can read this file. reviewer_id and author_id differ. PASS requires an empty blocking list. FAIL requires at least one blocking finding. Kintsugi items are repairs and do not block. reviewer_id differing from author_id, and sha equaling head_sha, are enforced in verdict.py.",
+  "$comment": "reviewer_id differing from author_id, and sha equaling head_sha, are enforced in verdict.py.",
   "type": "object",
   "additionalProperties": false,
   "required": [

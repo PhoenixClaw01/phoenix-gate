@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -229,6 +230,105 @@ class ReviewGateTests(unittest.TestCase):
             code, stdout, _stderr = run_main(module, ["--verdict", str(note), "--head", long_head])
         self.assertEqual(code, 0)
         self.assertIn(f"head: {long_head}", stdout)
+
+    def test_pass_with_blocking_or_the_same_author_refuses(self):
+        module = load_script()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            blocked = root / "blocked.json"
+            blocked.write_text(
+                json.dumps(
+                    {
+                        "verdict": "PASS",
+                        "sha": HEAD,
+                        "blocking": [
+                            {
+                                "kind": "leak",
+                                "summary": "private data is copied into a public log line",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            code, stdout, _stderr = run_main(module, ["--verdict", str(blocked), "--head", HEAD])
+            self.assertEqual(code, 1)
+            self.assertIn("decision: refuse", stdout)
+            self.assertIn("reason: blocking", stdout)
+            self.assertIn("approved: false", stdout)
+
+            empty = root / "empty.json"
+            empty.write_text(
+                json.dumps({"verdict": "PASS", "sha": HEAD, "blocking": []}),
+                encoding="utf-8",
+            )
+            code, stdout, _stderr = run_main(module, ["--verdict", str(empty), "--head", HEAD])
+            self.assertEqual(code, 0)
+            self.assertIn("reason: pass", stdout)
+            self.assertIn("approved: true", stdout)
+
+            same = root / "same.json"
+            same.write_text(
+                json.dumps(
+                    {
+                        "verdict": "PASS",
+                        "sha": HEAD,
+                        "author_id": "author-one",
+                        "reviewer_id": "author-one",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            code, stdout, _stderr = run_main(module, ["--verdict", str(same), "--head", HEAD])
+            self.assertEqual(code, 1)
+            self.assertIn("reason: author-is-reviewer", stdout)
+            self.assertIn("approved: false", stdout)
+
+            distinct = root / "distinct.json"
+            distinct.write_text(
+                json.dumps(
+                    {
+                        "verdict": "PASS",
+                        "sha": HEAD,
+                        "author_id": "author-one",
+                        "reviewer_id": "reviewer-alpha",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            code, stdout, _stderr = run_main(module, ["--verdict", str(distinct), "--head", HEAD])
+            self.assertEqual(code, 0)
+            self.assertIn("approved: true", stdout)
+
+            author_only = root / "author-only.json"
+            author_only.write_text(
+                json.dumps({"verdict": "PASS", "sha": HEAD, "author_id": "author-one"}),
+                encoding="utf-8",
+            )
+            code, stdout, _stderr = run_main(module, ["--verdict", str(author_only), "--head", HEAD])
+            self.assertEqual(code, 0)
+            self.assertIn("reason: pass", stdout)
+
+            note = root / "note.txt"
+            note.write_text(
+                f"author_id: author-one\nreviewer_id: author-one\nPASS {HEAD}\n",
+                encoding="utf-8",
+            )
+            code, stdout, _stderr = run_main(module, ["--verdict", str(note), "--head", HEAD])
+            self.assertEqual(code, 1)
+            self.assertIn("reason: author-is-reviewer", stdout)
+
+            listed = root / "listed.txt"
+            listed.write_text(f"blocking: leak\nPASS {HEAD}\n", encoding="utf-8")
+            code, stdout, _stderr = run_main(module, ["--verdict", str(listed), "--head", HEAD])
+            self.assertEqual(code, 1)
+            self.assertIn("reason: blocking", stdout)
+
+            clear = root / "clear.txt"
+            clear.write_text(f"blocking: []\nPASS {HEAD}\n", encoding="utf-8")
+            code, stdout, _stderr = run_main(module, ["--verdict", str(clear), "--head", HEAD])
+            self.assertEqual(code, 0)
+            self.assertIn("reason: pass", stdout)
 
     def test_script_does_not_open_the_network(self):
         text = (KIT / "review_gate.py").read_text(encoding="utf-8")

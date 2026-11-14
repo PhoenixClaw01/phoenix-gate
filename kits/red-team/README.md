@@ -35,7 +35,7 @@ It pairs with the review gate, which allows a merge only when a `PASS` verdict e
 | `author_id` | Who authored the change. This differs from `reviewer_id`. |
 | `timestamp` | UTC time, `YYYY-MM-DDTHH:MM:SSZ`. |
 
-`PASS` requires an empty `blocking` list. Kintsugi items may still be present. `FAIL` requires at least one blocking finding. A kintsugi list on its own is not a `FAIL`. `head_sha` and `sha` are the same value, and both match the current head. Anything else is rejected as `sha-mismatch` or `stale`.
+`PASS` requires an empty `blocking` list. Kintsugi items may still be present. `FAIL` requires at least one blocking finding. A kintsugi list on its own is not a `FAIL`. `head_sha` and `sha` are the same value, and both match the current head. `reviewer_id` differs from `author_id`. Those two equalities are enforced in `verdict.py`. The document `repo` and `pr` must match the target you pass in. Anything else is rejected as `sha-mismatch`, `repo-mismatch`, `pr-mismatch`, or `stale`.
 
 `examples/pass-current.json` is a `PASS` for `a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0`. `examples/pass-with-kintsugi.json` is a `PASS` with one open repair. `examples/fail-blocking.json` is a `FAIL` with one leak and one repair. `examples/stale.json` is a `PASS` for a different sha.
 
@@ -44,7 +44,9 @@ It pairs with the review gate, which allows a merge only when a `PASS` verdict e
 ```bash
 python3 kits/red-team/verdict.py \
   --verdict kits/red-team/examples/pass-current.json \
-  --head a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0
+  --head a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0 \
+  --repo example/repo \
+  --pr 7
 ```
 
 Hand the same file to the review gate:
@@ -55,21 +57,21 @@ python3 kits/review-gate/review_gate.py \
   --head a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0
 ```
 
-The validator rejects a verdict whose head SHA is not the current head. The review gate then allows a merge only when the verdict it reads is `PASS` for that same head.
+The validator rejects a verdict whose head SHA, repo, or PR is not the target you named. The review gate then allows a merge only when the verdict it reads is `PASS` for that same head, the blocking list is empty, and `author_id` is not `reviewer_id` when both are present.
 
 ## Exit codes
 
 | code | meaning |
 | --- | --- |
-| 0 | The verdict is valid and its head SHA is the current head. |
-| 1 | Reject. The reason is `stale`, `sha-mismatch`, `author-is-reviewer`, `blocking-on-pass`, or `fail-without-blocking`. |
-| 2 | The verdict file or the head SHA is missing or not usable. |
+| 0 | The verdict is valid for this repo, PR, and head. |
+| 1 | Reject. The reason is `stale`, `sha-mismatch`, `repo-mismatch`, `pr-mismatch`, `author-is-reviewer`, `blocking-on-pass`, or `fail-without-blocking`. |
+| 2 | The verdict file, the head SHA, the repo, or the PR is missing or not usable. |
 
-Stdout lines are `decision`, `reason`, `head`, `verdict`, and `reviewer`.
+Stdout lines are `decision`, `reason`, `head`, `verdict`, and `reviewer`. A current `PASS` prints `decision: accept`. A current `FAIL` prints `decision: valid`.
 
 ## Routing
 
-Routing is model-agnostic. A job names a lane. The reviewer config chooses which reviewer and which backend run that job. The author id is never chosen as the reviewer.
+Routing is model-agnostic. A job names a lane. The reviewer config stores an adapter name and chooses which reviewer runs that job. The author id is never chosen as the reviewer. `dispatch` receives the adapter you pass for that name.
 
 ```bash
 python3 kits/red-team/routing.py \
@@ -81,7 +83,7 @@ python3 kits/red-team/routing.py \
   --lane default
 ```
 
-This command prints the chosen reviewer and backend. It does not write a verdict and it does not approve a merge.
+This command prints the chosen reviewer and adapter name. An adapter name that is not registered is refused with `unknown-backend`, the same check `dispatch` uses. It does not write a verdict and it does not approve a merge.
 
 Backends are pluggable adapters. The interface is one method:
 
@@ -91,7 +93,7 @@ review(job) -> ReviewDraft
 
 `ReviewDraft` carries `verdict`, `blocking`, and `kintsugi`. The router stamps `reviewer_id`, `author_id`, the head SHA, and the timestamp, then checks the document.
 
-This kit ships one adapter, named `local` in `examples/reviewer-config.json`. `local` is an in-process stand-in for tests and wiring. It returns a draft only when the caller supplies one. It does not inspect a diff and it does not invent a `PASS`. A project that wants another backend registers an adapter under a backend name in its own config. Backend names are strings in that config.
+The config field `backend` stores an adapter name. Pass the adapter object to `dispatch` under that name. This kit ships one adapter, named `local` in `examples/reviewer-config.json`. `local` is an in-process stand-in for tests and wiring. It returns a draft only when the caller supplies one. It does not inspect a diff and it does not invent a `PASS`. A project that wants another adapter registers it under its own name and passes that object to `dispatch`.
 
 `REVIEW-PROMPT.md` is the template for what a review checks, and for the blocking-versus-kintsugi rule.
 

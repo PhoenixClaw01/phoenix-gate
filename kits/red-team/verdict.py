@@ -62,6 +62,16 @@ def check_repo(value: object, *, reason: str = "bad-verdict") -> str:
     return token
 
 
+def same_pr(left: object, right: object) -> bool:
+    left_number = isinstance(left, int) and not isinstance(left, bool)
+    right_number = isinstance(right, int) and not isinstance(right, bool)
+    if left_number and isinstance(right, str) and right.isdigit():
+        return left == int(right)
+    if right_number and isinstance(left, str) and left.isdigit():
+        return right == int(left)
+    return left == right
+
+
 def check_pr(value: object, *, reason: str = "bad-verdict") -> int | str:
     if isinstance(value, bool) or isinstance(value, float):
         raise RedTeamError(reason)
@@ -147,13 +157,16 @@ def _item_list(value: object, parse) -> list[dict[str, str]]:
     return [parse(item) for item in value]
 
 
-def validate_verdict(data: object, *, head: str) -> dict[str, object]:
+def validate_verdict(data: object, *, head: str, repo: str, pr: object) -> dict[str, object]:
     """Return a normalized verdict, or raise RedTeamError.
 
-    `stale` means head_sha is not the current head. `sha` must equal
-    `head_sha` so a review-gate file and this check name the same commit.
+    `stale` means head_sha is not the current head. `repo-mismatch` and
+    `pr-mismatch` mean the document is not for this repo or PR. `sha`
+    must equal `head_sha`.
     """
     current = normalize_sha(head, reason="bad-head")
+    expected_repo = check_repo(repo, reason="bad-repo")
+    expected_pr = check_pr(pr, reason="bad-pr")
     if not isinstance(data, dict) or set(data) != set(REQUIRED_FIELDS):
         raise RedTeamError("bad-verdict")
     verdict = data.get("verdict")
@@ -181,6 +194,10 @@ def validate_verdict(data: object, *, head: str) -> dict[str, object]:
         raise RedTeamError("blocking-on-pass")
     if verdict == "FAIL" and not blocking:
         raise RedTeamError("fail-without-blocking")
+    if document["repo"] != expected_repo:
+        raise RedTeamError("repo-mismatch")
+    if not same_pr(document["pr"], expected_pr):
+        raise RedTeamError("pr-mismatch")
     if document["head_sha"] != current:
         raise RedTeamError("stale")
     return document
@@ -202,11 +219,20 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check a red-team verdict against one head.")
     parser.add_argument("--verdict", required=True, help="JSON verdict file")
     parser.add_argument("--head", required=True, help="Current head sha")
+    parser.add_argument("--repo", required=True, help="Target repository, owner/name")
+    parser.add_argument("--pr", required=True, help="Target pull request id")
     args = parser.parse_args(argv)
     try:
         head = normalize_sha(args.head, reason="bad-head")
     except RedTeamError as exc:
         print(f"head is not usable ({exc.reason})", file=sys.stderr)
+        return 2
+    try:
+        repo = check_repo(args.repo, reason="bad-repo")
+        pr_token: object = int(args.pr) if str(args.pr).isdigit() else args.pr
+        pr = check_pr(pr_token, reason="bad-pr")
+    except RedTeamError as exc:
+        print(f"target is not usable ({exc.reason})", file=sys.stderr)
         return 2
     verdict_path = Path(args.verdict)
     if not verdict_path.is_file():
@@ -218,7 +244,7 @@ def main(argv: list[str] | None = None) -> int:
         print("verdict is not readable", file=sys.stderr)
         return 2
     try:
-        document = validate_verdict(payload, head=head)
+        document = validate_verdict(payload, head=head, repo=repo, pr=pr)
     except RedTeamError as exc:
         if exc.reason == "bad-verdict" or not isinstance(payload, dict):
             print("verdict is not readable", file=sys.stderr)
@@ -235,7 +261,8 @@ def main(argv: list[str] | None = None) -> int:
             end="",
         )
         return 1
-    print(format_result(document, decision="accept", reason="current", head=head), end="")
+    decision = "valid" if document["verdict"] == "FAIL" else "accept"
+    print(format_result(document, decision=decision, reason="current", head=head), end="")
     return 0
 
 
