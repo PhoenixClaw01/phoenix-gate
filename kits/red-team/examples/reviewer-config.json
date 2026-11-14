@@ -1,0 +1,14 @@
+{
+  "routes": [
+    {
+      "reviewer_id": "reviewer-alpha",
+      "backend": "local",
+      "lanes": ["default"]
+    },
+    {
+      "reviewer_id": "reviewer-beta",
+      "backend": "local",
+      "lanes": ["breakage"]
+    }
+  ]
+}

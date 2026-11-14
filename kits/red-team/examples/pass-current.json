@@ -1,0 +1,12 @@
+{
+  "repo": "example/repo",
+  "pr": 7,
+  "head_sha": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+  "sha": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+  "verdict": "PASS",
+  "blocking": [],
+  "kintsugi": [],
+  "reviewer_id": "reviewer-alpha",
+  "author_id": "author-one",
+  "timestamp": "2026-11-14T05:00:00Z"
+}
