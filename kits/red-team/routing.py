@@ -221,7 +221,15 @@ def build_verdict(
         "author_id": job.author_id,
         "timestamp": timestamp,
     }
-    return validate_verdict(document, head=job.head_sha)
+    return validate_verdict(document, head=job.head_sha, repo=job.repo, pr=job.pr)
+
+
+def require_backend(name: str, backends: Mapping[str, ReviewBackend]) -> ReviewBackend:
+    """Return the adapter registered under this name."""
+    try:
+        return backends[name]
+    except KeyError:
+        raise RedTeamError("unknown-backend") from None
 
 
 def dispatch(
@@ -238,10 +246,7 @@ def dispatch(
     route = select_reviewer(config, job)
     if route.reviewer_id == job.author_id:
         raise RedTeamError("author-is-reviewer")
-    try:
-        backend = backends[route.backend]
-    except KeyError:
-        raise RedTeamError("unknown-backend") from None
+    backend = require_backend(route.backend, backends)
     draft = backend.review(job)
     return build_verdict(job, route.reviewer_id, draft, timestamp=stamp(now))
 
@@ -304,6 +309,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         route = select_reviewer(config, job)
+        require_backend(route.backend, builtin_backends())
     except RedTeamError as exc:
         print(format_reject(exc.reason, job), end="")
         return 1

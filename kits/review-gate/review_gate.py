@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Allow a merge only when a verdict says PASS for the exact current head.
 
-The verdict file is caller-supplied JSON or text. This script does not open
-the network, does not read credentials, and does not merge.
+A PASS with a non-empty blocking list is refused. A PASS whose author_id
+and reviewer_id are both present and equal is refused. The verdict file
+is caller-supplied JSON or text. This script does not open the network,
+does not read credentials, and does not merge.
 """
 
 from __future__ import annotations
@@ -17,6 +19,8 @@ from pathlib import Path
 
 SHA_RE = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{40}|[0-9a-fA-F]{64})(?![0-9a-fA-F])")
 VERDICT_RE = re.compile(r"PASS|FAIL", re.IGNORECASE)
+# Same id rule as the red-team verdict check: one lowercase token.
+ID_RE = re.compile(r"[a-z][a-z0-9-]{0,63}")
 
 
 class GateError(Exception):
@@ -47,7 +51,58 @@ def find_sha(text: str) -> str | None:
     return match.group(1).lower()
 
 
-def parse_verdict(text: str) -> list[tuple[str, str | None]]:
+class VerdictRecord:
+    def __init__(
+        self,
+        verdict: str,
+        sha: str | None,
+        *,
+        blocking_open: bool = False,
+        author_id: str | None = None,
+        reviewer_id: str | None = None,
+        author_set: bool = False,
+        reviewer_set: bool = False,
+    ) -> None:
+        self.verdict = verdict
+        self.sha = sha
+        self.blocking_open = blocking_open
+        self.author_id = author_id
+        self.reviewer_id = reviewer_id
+        self.author_set = author_set
+        self.reviewer_set = reviewer_set
+
+
+def _optional_id(value: object) -> str | None:
+    """Strip, then keep only an id the red-team verdict check would accept."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise GateError("bad-verdict")
+    token = value.strip()
+    if not token:
+        return None
+    if ID_RE.fullmatch(token) is None:
+        raise GateError("bad-verdict")
+    return token
+
+
+def _blocking_open(value: object) -> bool:
+    if value is None:
+        return False
+    if not isinstance(value, list):
+        raise GateError("bad-verdict")
+    return len(value) > 0
+
+
+def _text_blocking(value: str) -> bool:
+    return value.strip().lower() not in ("", "[]", "0", "none")
+
+
+def _same_party(author_id: str | None, reviewer_id: str | None) -> bool:
+    return author_id is not None and reviewer_id is not None and author_id == reviewer_id
+
+
+def parse_verdict(text: str) -> list[VerdictRecord]:
     stripped = text.strip()
     if not stripped:
         return []
@@ -58,22 +113,90 @@ def parse_verdict(text: str) -> list[tuple[str, str | None]]:
             raise GateError("bad-verdict") from exc
         if not isinstance(data, dict):
             raise GateError("bad-verdict")
-        sha = None
-        if "sha" in data and data.get("sha") not in (None, ""):
-            sha = normalize_sha(data["sha"])
-        tokens = str(data.get("verdict", "")).split()
-        verdict = whole_verdict(tokens[0]) if tokens else None
-        if verdict is None:
+        record = _record_from_json(data)
+        if record is None:
             return []
-        return [(verdict, sha)]
+        return [record]
     return _parse_text(stripped)
 
 
-def _parse_text(text: str) -> list[tuple[str, str | None]]:
-    records: list[tuple[str, str | None]] = []
+def _record_from_json(data: dict) -> VerdictRecord | None:
+    sha = None
+    if "sha" in data and data.get("sha") not in (None, ""):
+        sha = normalize_sha(data["sha"])
+    tokens = str(data.get("verdict", "")).split()
+    verdict = whole_verdict(tokens[0]) if tokens else None
+    if verdict is None:
+        return None
+    author_id = _optional_id(data["author_id"]) if "author_id" in data else None
+    reviewer_id = _optional_id(data["reviewer_id"]) if "reviewer_id" in data else None
+    blocking_open = _blocking_open(data["blocking"]) if "blocking" in data else False
+    return VerdictRecord(
+        verdict,
+        sha,
+        blocking_open=blocking_open,
+        author_id=author_id,
+        reviewer_id=reviewer_id,
+        author_set=author_id is not None or "author_id" in data,
+        reviewer_set=reviewer_id is not None or "reviewer_id" in data,
+    )
+
+
+def _parse_text(text: str) -> list[VerdictRecord]:
+    records: list[VerdictRecord] = []
     pending_verdict: str | None = None
     pending_sha: str | None = None
     saw_sha = False
+    pending_author: str | None = None
+    pending_reviewer: str | None = None
+    pending_author_set = False
+    pending_reviewer_set = False
+    pending_blocking = False
+
+    def set_author(value: str) -> None:
+        nonlocal pending_author, pending_author_set
+        if pending_author_set:
+            raise GateError("duplicate-id")
+        pending_author = _optional_id(value)
+        pending_author_set = True
+
+    def set_reviewer(value: str) -> None:
+        nonlocal pending_reviewer, pending_reviewer_set
+        if pending_reviewer_set:
+            raise GateError("duplicate-id")
+        pending_reviewer = _optional_id(value)
+        pending_reviewer_set = True
+
+    def take_side() -> tuple[bool, str | None, str | None, bool, bool]:
+        nonlocal pending_author, pending_reviewer, pending_author_set, pending_reviewer_set
+        nonlocal pending_blocking
+        side = (
+            pending_blocking,
+            pending_author,
+            pending_reviewer,
+            pending_author_set,
+            pending_reviewer_set,
+        )
+        pending_author = None
+        pending_reviewer = None
+        pending_author_set = False
+        pending_reviewer_set = False
+        pending_blocking = False
+        return side
+
+    def emit(verdict: str, sha: str | None) -> None:
+        blocking_open, author_id, reviewer_id, author_set, reviewer_set = take_side()
+        records.append(
+            VerdictRecord(
+                verdict,
+                sha,
+                blocking_open=blocking_open,
+                author_id=author_id,
+                reviewer_id=reviewer_id,
+                author_set=author_set,
+                reviewer_set=reviewer_set,
+            )
+        )
 
     def flush() -> None:
         nonlocal pending_verdict, pending_sha, saw_sha
@@ -83,7 +206,7 @@ def _parse_text(text: str) -> list[tuple[str, str | None]]:
             return
         if saw_sha and pending_sha is None:
             raise GateError("bad-verdict")
-        records.append((pending_verdict, pending_sha))
+        emit(pending_verdict, pending_sha)
         pending_verdict = None
         pending_sha = None
         saw_sha = False
@@ -93,6 +216,15 @@ def _parse_text(text: str) -> list[tuple[str, str | None]]:
         if not raw or raw.startswith("#"):
             continue
         lower = raw.lower()
+        if lower.startswith("author_id:"):
+            set_author(raw.split(":", 1)[1])
+            continue
+        if lower.startswith("reviewer_id:"):
+            set_reviewer(raw.split(":", 1)[1])
+            continue
+        if lower.startswith("blocking:"):
+            pending_blocking = _text_blocking(raw.split(":", 1)[1])
+            continue
         if lower.startswith("verdict:"):
             if pending_verdict is not None:
                 flush()
@@ -117,28 +249,46 @@ def _parse_text(text: str) -> list[tuple[str, str | None]]:
         if verdict is None:
             continue
         flush()
-        records.append((verdict, find_sha(raw)))
+        emit(verdict, find_sha(raw))
     flush()
+    if records and (pending_blocking or pending_author_set or pending_reviewer_set):
+        last = records[-1]
+        if (last.author_set and pending_author_set) or (last.reviewer_set and pending_reviewer_set):
+            raise GateError("duplicate-id")
+        records[-1] = VerdictRecord(
+            last.verdict,
+            last.sha,
+            blocking_open=last.blocking_open or pending_blocking,
+            author_id=pending_author if pending_author_set else last.author_id,
+            reviewer_id=pending_reviewer if pending_reviewer_set else last.reviewer_id,
+            author_set=last.author_set or pending_author_set,
+            reviewer_set=last.reviewer_set or pending_reviewer_set,
+        )
     return records
 
 
-def evaluate(records: list[tuple[str, str | None]], head: str) -> dict[str, object]:
+def evaluate(records: list[VerdictRecord], head: str) -> dict[str, object]:
     current = head.lower()
     # Last PASS or FAIL for this sha wins. A FAIL with no sha counts too,
     # so a later FAIL overrides an earlier PASS.
-    last_for_head: str | None = None
-    for verdict, sha in records:
-        if verdict == "PASS" and sha == current:
-            last_for_head = "PASS"
-        elif verdict == "FAIL" and sha in (current, None):
-            last_for_head = "FAIL"
-    if last_for_head == "PASS":
-        decision, reason, approved = "allow", "pass", True
-    elif last_for_head == "FAIL":
+    last_for_head: VerdictRecord | None = None
+    for record in records:
+        if record.verdict == "PASS" and record.sha == current:
+            last_for_head = record
+        elif record.verdict == "FAIL" and record.sha in (current, None):
+            last_for_head = record
+    if last_for_head is not None and last_for_head.verdict == "PASS":
+        if last_for_head.blocking_open:
+            decision, reason, approved = "refuse", "blocking", False
+        elif _same_party(last_for_head.author_id, last_for_head.reviewer_id):
+            decision, reason, approved = "refuse", "author-is-reviewer", False
+        else:
+            decision, reason, approved = "allow", "pass", True
+    elif last_for_head is not None and last_for_head.verdict == "FAIL":
         decision, reason, approved = "refuse", "no-pass", False
-    elif any(verdict == "PASS" and sha not in (None, current) for verdict, sha in records):
+    elif any(record.verdict == "PASS" and record.sha not in (None, current) for record in records):
         decision, reason, approved = "refuse", "stale", False
-    elif any(verdict == "PASS" and sha is None for verdict, sha in records):
+    elif any(record.verdict == "PASS" and record.sha is None for record in records):
         decision, reason, approved = "refuse", "missing-sha", False
     else:
         decision, reason, approved = "refuse", "no-pass", False
@@ -202,7 +352,19 @@ def main(argv: list[str] | None = None, *, cwd: Path | None = None) -> int:
         return 2
     try:
         records = parse_verdict(verdict_path.read_text(encoding="utf-8"))
-    except (GateError, UnicodeDecodeError):
+    except UnicodeDecodeError:
+        print("verdict is not readable", file=sys.stderr)
+        return 2
+    except GateError as exc:
+        if exc.reason == "duplicate-id":
+            result = {
+                "decision": "refuse",
+                "reason": "duplicate-id",
+                "head": head,
+                "approved": False,
+            }
+            print(format_result(result, dry_run=args.dry_run), end="")
+            return 1
         print("verdict is not readable", file=sys.stderr)
         return 2
     result = evaluate(records, head)

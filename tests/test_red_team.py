@@ -62,6 +62,14 @@ def example(name: str) -> dict:
     return json.loads((KIT / "examples" / name).read_text(encoding="utf-8"))
 
 
+def checked(module, document, head, *, repo="example/repo", pr=7):
+    return module.validate_verdict(document, head=head, repo=repo, pr=pr)
+
+
+def verdict_cli(path, head, *, repo="example/repo", pr="7") -> list[str]:
+    return ["--verdict", str(path), "--head", head, "--repo", repo, "--pr", pr]
+
+
 def write_verdict(directory: Path, document: dict) -> Path:
     path = directory / "verdict.json"
     path.write_text(json.dumps(document) + "\n", encoding="utf-8")
@@ -83,21 +91,24 @@ class RedTeamSchemaTests(unittest.TestCase):
             ["small", "medium", "large"],
         )
         self.assertIs(schema["additionalProperties"], False)
+        self.assertIn("verdict.py", schema["$comment"])
+        self.assertIn("author_id", schema["$comment"])
+        self.assertIn("head_sha", schema["$comment"])
 
     def test_examples_match_the_head_they_name(self):
         module = load_script("verdict.py")
         current = example("pass-current.json")["head_sha"]
         for name in ("pass-current.json", "pass-with-kintsugi.json", "fail-blocking.json"):
             document = example(name)
-            checked = module.validate_verdict(document, head=current)
-            self.assertEqual(checked["verdict"], document["verdict"])
-            self.assertEqual(checked["sha"], current)
-            self.assertNotEqual(checked["reviewer_id"], checked["author_id"])
+            accepted = checked(module, document, head=current)
+            self.assertEqual(accepted["verdict"], document["verdict"])
+            self.assertEqual(accepted["sha"], current)
+            self.assertNotEqual(accepted["reviewer_id"], accepted["author_id"])
         stale = example("stale.json")
         with self.assertRaises(module.RedTeamError) as caught:
-            module.validate_verdict(stale, head=current)
+            checked(module, stale, head=current)
         self.assertEqual(caught.exception.reason, "stale")
-        self.assertEqual(module.validate_verdict(stale, head=stale["head_sha"])["verdict"], "PASS")
+        self.assertEqual(checked(module, stale, head=stale["head_sha"])["verdict"], "PASS")
 
     def test_schema_rejects_a_broken_document(self):
         module = load_script("verdict.py")
@@ -117,7 +128,7 @@ class RedTeamSchemaTests(unittest.TestCase):
         del missing_size["kintsugi"][0]["size"]
         for document in (missing, extra, lowered, bad_kind, missing_size, [], "PASS"):
             with self.assertRaises(module.RedTeamError) as caught:
-                module.validate_verdict(document, head=current)
+                checked(module, document, head=current)
             self.assertEqual(caught.exception.reason, "bad-verdict")
 
     def test_pass_cannot_carry_a_blocking_finding(self):
@@ -127,21 +138,21 @@ class RedTeamSchemaTests(unittest.TestCase):
             {"kind": "attacker-reachable", "summary": "an outside input reaches a state change"}
         ]
         with self.assertRaises(module.RedTeamError) as caught:
-            module.validate_verdict(document, head=document["head_sha"])
+            checked(module, document, head=document["head_sha"])
         self.assertEqual(caught.exception.reason, "blocking-on-pass")
 
     def test_kintsugi_repairs_do_not_block(self):
         module = load_script("verdict.py")
         passed = example("pass-with-kintsugi.json")
-        checked = module.validate_verdict(passed, head=passed["head_sha"])
-        self.assertEqual(checked["verdict"], "PASS")
-        self.assertEqual(checked["blocking"], [])
-        self.assertEqual(checked["kintsugi"][0]["size"], "small")
+        accepted = checked(module, passed, head=passed["head_sha"])
+        self.assertEqual(accepted["verdict"], "PASS")
+        self.assertEqual(accepted["blocking"], [])
+        self.assertEqual(accepted["kintsugi"][0]["size"], "small")
         failed = example("pass-current.json")
         failed["verdict"] = "FAIL"
         failed["kintsugi"] = [{"repair": "give the helper a clearer name", "size": "medium"}]
         with self.assertRaises(module.RedTeamError) as caught:
-            module.validate_verdict(failed, head=failed["head_sha"])
+            checked(module, failed, head=failed["head_sha"])
         self.assertEqual(caught.exception.reason, "fail-without-blocking")
 
     def test_author_and_reviewer_must_differ(self):
@@ -149,7 +160,7 @@ class RedTeamSchemaTests(unittest.TestCase):
         document = example("pass-current.json")
         document["reviewer_id"] = document["author_id"]
         with self.assertRaises(module.RedTeamError) as caught:
-            module.validate_verdict(document, head=document["head_sha"])
+            checked(module, document, head=document["head_sha"])
         self.assertEqual(caught.exception.reason, "author-is-reviewer")
 
     def test_sha_must_equal_head_sha(self):
@@ -157,21 +168,21 @@ class RedTeamSchemaTests(unittest.TestCase):
         document = example("pass-current.json")
         document["sha"] = example("stale.json")["sha"]
         with self.assertRaises(module.RedTeamError) as caught:
-            module.validate_verdict(document, head=document["head_sha"])
+            checked(module, document, head=document["head_sha"])
         self.assertEqual(caught.exception.reason, "sha-mismatch")
 
     def test_cli_accepts_the_current_head_and_rejects_a_stale_one(self):
         module = load_script("verdict.py")
         current = example("pass-current.json")["head_sha"]
         passed = KIT / "examples" / "pass-current.json"
-        code, stdout, stderr = run_main(module, ["--verdict", str(passed), "--head", current.upper()])
+        code, stdout, stderr = run_main(module, verdict_cli(passed, current.upper()))
         self.assertEqual(code, 0, stderr)
         self.assertIn("decision: accept", stdout)
         self.assertIn("reason: current", stdout)
         self.assertIn(f"head: {current}", stdout)
         self.assertIn("verdict: PASS", stdout)
         stale = KIT / "examples" / "stale.json"
-        code, stdout, _stderr = run_main(module, ["--verdict", str(stale), "--head", current])
+        code, stdout, _stderr = run_main(module, verdict_cli(stale, current))
         self.assertEqual(code, 1)
         self.assertIn("decision: reject", stdout)
         self.assertIn("reason: stale", stdout)
@@ -183,19 +194,45 @@ class RedTeamSchemaTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             missing = root / "missing.json"
-            code, _stdout, stderr = run_main(module, ["--verdict", str(missing), "--head", current])
+            code, _stdout, stderr = run_main(module, verdict_cli(missing, current))
             self.assertEqual(code, 2)
             self.assertIn("missing", stderr)
             broken = root / "broken.json"
             broken.write_text("{", encoding="utf-8")
-            code, _stdout, stderr = run_main(module, ["--verdict", str(broken), "--head", current])
+            code, _stdout, stderr = run_main(module, verdict_cli(broken, current))
             self.assertEqual(code, 2)
             self.assertIn("not readable", stderr)
         code, _stdout, stderr = run_main(
-            module, ["--verdict", str(KIT / "examples" / "pass-current.json"), "--head", "short"]
+            module, verdict_cli(KIT / "examples" / "pass-current.json", "short")
         )
         self.assertEqual(code, 2)
         self.assertIn("head", stderr)
+        code, _stdout, stderr = run_main(
+            module, verdict_cli(KIT / "examples" / "pass-current.json", current, repo="not-a-repo")
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("target", stderr)
+
+    def test_repo_and_pr_must_match_the_target(self):
+        module = load_script("verdict.py")
+        document = example("pass-current.json")
+        with self.assertRaises(module.RedTeamError) as repo_miss:
+            checked(module, document, document["head_sha"], repo="example/other")
+        self.assertEqual(repo_miss.exception.reason, "repo-mismatch")
+        with self.assertRaises(module.RedTeamError) as pr_miss:
+            checked(module, document, document["head_sha"], pr=8)
+        self.assertEqual(pr_miss.exception.reason, "pr-mismatch")
+        self.assertEqual(checked(module, document, document["head_sha"], pr="7")["verdict"], "PASS")
+
+    def test_a_current_fail_prints_valid(self):
+        module = load_script("verdict.py")
+        current = example("fail-blocking.json")["head_sha"]
+        failed = KIT / "examples" / "fail-blocking.json"
+        code, stdout, stderr = run_main(module, verdict_cli(failed, current))
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("decision: valid", stdout)
+        self.assertIn("verdict: FAIL", stdout)
+        self.assertNotIn("decision: accept", stdout)
 
 
 class RedTeamRoutingTests(unittest.TestCase):
@@ -363,6 +400,46 @@ class RedTeamRoutingTests(unittest.TestCase):
         self.assertIn("reviewer: reviewer-beta", stdout)
         self.assertIn("backend: local", stdout)
 
+    def test_cli_refuses_an_unregistered_backend(self):
+        module = load_script("routing.py")
+        head = example("pass-current.json")["head_sha"]
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "routes": [
+                            {
+                                "reviewer_id": "reviewer-alpha",
+                                "backend": "other",
+                                "lanes": ["default"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            code, stdout, _stderr = run_main(
+                module,
+                [
+                    "--config",
+                    str(config),
+                    "--repo",
+                    "example/repo",
+                    "--pr",
+                    "7",
+                    "--head",
+                    head,
+                    "--author",
+                    "author-one",
+                    "--lane",
+                    "default",
+                ],
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("reason: unknown-backend", stdout)
+        self.assertNotIn("decision: route", stdout)
+
     def test_a_missing_lane_has_no_reviewer(self):
         module = load_script("routing.py")
         head = example("pass-current.json")["head_sha"]
@@ -388,7 +465,12 @@ class RedTeamReviewGateTests(unittest.TestCase):
             kintsugi=({"repair": "give the helper a clearer name", "size": "small"},),
         )
         document = routing.dispatch(config, job, {"local": routing.LocalMockAdapter(draft)}, now=WHEN)
-        self.assertEqual(verdict.validate_verdict(document, head=head)["verdict"], "PASS")
+        self.assertEqual(
+            verdict.validate_verdict(
+                document, head=head, repo=document["repo"], pr=document["pr"]
+            )["verdict"],
+            "PASS",
+        )
         with tempfile.TemporaryDirectory() as tmp:
             path = write_verdict(Path(tmp), document)
             code, stdout, stderr = run_main(gate, ["--verdict", str(path), "--head", head])
